@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from typing import Any, Callable, Optional, Union, Dict
 from torch import Tensor
-
+import os
+os.environ["MIOPEN_DISABLE_CACHE"] = "1"
 import torch.utils.model_zoo as model_zoo
 from .lpf_layers import *
 
@@ -12,12 +13,14 @@ __all__ = ['ResNet', 'resnet18']
 # helper functions
 # ---------------------------------------------------------
 def get_aa_layer(
-    channels: int, 
-    stride: int, 
-    aa_type: str, 
+    channels: int,
+    stride: int,
+    aa_type: str,
     wavelet_type: str,
-    filter_size: int, 
-    pasa_group: int
+    filter_size: int,
+    pasa_group: int,
+    dab_controller=None,  # Added this argument
+    depth_index=None      # Added this argument
 ) -> nn.Module:
     if stride == 1:
         return nn.Identity()
@@ -30,14 +33,14 @@ def get_aa_layer(
         'dab': lambda: DABPool(
             channels, channels, # DABPool handles in/out channels, but often keeps dim or uses 1x1 proj separately
             kernel_size=3, stride=stride, padding=1,
-            depth_index=depth_index, 
+            depth_index=depth_index,
             dab_controller=dab_controller
         ),
     }
 
     # .get() returns None if key doesn't exist, triggering the fallback
     layer_factory = layer_registry.get(aa_type)
-    
+
     return layer_factory() if layer_factory else nn.Identity()
 
 
@@ -53,6 +56,7 @@ def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, d
         bias=False,
         dilation=dilation,
     )
+
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
     """1x1 convolution"""

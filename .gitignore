@@ -1,0 +1,5 @@
+*pycache*
+.python-version
+.vscode/
+weights/*.tar
+dataset/tiny-imagenet-200
