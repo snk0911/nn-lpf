@@ -37,23 +37,16 @@ parser.add_argument('--arch', metavar='ARCH', default='resnet18',
                         ' | '.join(model_names) +
                         ' (default: resnet18)')
 
-parser.add_argument('--aa_type', type=str, default='blur',
-                    help='choose between aa methods (default: blur)')
-
-parser.add_argument('--filter_size', type=int, default=4, choices=range(1, 8),
-                    help='Anti-aliasing filter size (1-7, default: 4)')
-
-parser.add_argument('--pasa_group', dest='pasa_group', type=int, default='8',
-                    help='group number of pasa operation (default: 8)')
-
-parser.add_argument('--wavelet_type', type=str, default='haar', help='Type of wavelet')
+parser.add_argument('--aa_type', type=str, default='blur', help='choose between aa methods (default: blur)')
+parser.add_argument('--filter_size', type=int, default=4, choices=range(1, 8), help='Anti-aliasing filter size (1-7, default: 4)')
+parser.add_argument('--pasa_group', dest='pasa_group', type=int, default='8', help='group number of pasa operation (default: 8)')
+parser.add_argument('--wavelet_type', type=str, default='db2', help='Type of wavelet')
 
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 
 parser.add_argument('-ep', '--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
-
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 
@@ -63,25 +56,13 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
 
-parser.add_argument('--lr', '--learning-rate', default=0.2, type=float,
-                    metavar='LR', help='initial learning rate', dest='lr')
-
-parser.add_argument('--lr-scheduler', default='cosine', 
-                    choices=['step', 'cosine','exponential','plateau'], 
-                    help='')
-
-parser.add_argument("--lr_warmup_epochs", default=0, type=int, help="the number of epochs to warmup (default: 0)")
-
-parser.add_argument(
-    "--lr-warmup-method", default="constant", type=str, help="the warmup method (default: constant)"
-)
-
+parser.add_argument('--lr', '--learning_rate', default=0.2, type=float, metavar='LR', help='initial learning rate', dest='lr')
+parser.add_argument('--lr_scheduler', default='cosine', choices=['step', 'cosine','exponential','plateau'], help='learning rate scheduler (default: cosine)')
+parser.add_argument("--lr_warmup_epochs", default=5, type=int, help="the number of epochs to warmup (default: 0)")
+parser.add_argument("--lr-warmup-method", default="linear", type=str, help="the warmup method (default: linear)")
 parser.add_argument("--lr_warmup_decay", default=0.01, type=float, help="the decay for lr")
-
 parser.add_argument("--lr_step_size", default=30, type=int, help="decrease lr every step-size epochs")
-
 parser.add_argument("--lr_gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
-
 parser.add_argument("--lr_min", default=0.0, type=float, help="minimum lr of lr schedule (default: 0.0)")
 
 
@@ -133,8 +114,7 @@ parser.add_argument('--dist-backend', default='nccl', type=str,
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
 
-parser.add_argument('--gpu', default=None, type=int,
-                    help='GPU id to use.')
+parser.add_argument('--gpu', default=0, type=int, help='GPU id to use.')
 
 parser.add_argument('--multiprocessing-distributed', action='store_true',
                     help='Use multi-processing distributed training to launch '
@@ -189,8 +169,15 @@ best_acc1 = 0
 
 def main():
     args = parser.parse_args()
+    print(f"lr: {args.lr}")
+    print(f"lr_scheduler: {args.lr_scheduler}")
+    print(f"lr_warmup_method: {args.lr_warmup_method}")
+    print(f"lr_warmup_epochs: {args.lr_warmup_epochs}")  
     print(f"aa_type: {args.aa_type}")
     if args.aa_type == 'blur':
+        print(f"filter_size: {args.filter_size}")
+        subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
+    elif args.aa_type == 'dab':
         print(f"filter_size: {args.filter_size}")
         subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
     elif args.aa_type == 'pasa':
@@ -528,6 +515,7 @@ def main_worker(gpu, ngpus_per_node, args):
             raise RuntimeError(
                 f"Invalid warmup lr method '{args.lr_warmup_method}'. Only linear and constant are supported."
             )
+        print("sequential lr started, lr_warmup_method > 0")
         lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer, schedulers=[warmup_lr_scheduler, main_lr_scheduler], milestones=[args.lr_warmup_epochs]
         )
