@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 from typing import Any, Callable, Optional, Union, Dict
 from torch import Tensor
-import os
-os.environ["MIOPEN_DISABLE_CACHE"] = "1"
 import torch.utils.model_zoo as model_zoo
 from .lpf_layers import *
 
@@ -28,7 +26,12 @@ def get_aa_layer(
     # Map strings to lambda functions that instantiate the layers
     layer_registry: Dict[str, Callable[[], nn.Module]] = {
         'blur': lambda: BlurPool(channels, filter_size=filter_size, stride=stride),
-        'pasa': lambda: Downsample_PASA_group_softmax(channels, filter_size, stride, group=pasa_group),
+        'avg': lambda: nn.AvgPool2d(
+            kernel_size=filter_size,
+            stride=stride,
+            padding=filter_size // 2
+        ),
+        'softpool': lambda: PerChannelSoftPool(channels, kernel_size=filter_size, stride=stride),
         'dwt': lambda: DWT_2D_tiny(wavelet_type),
         'dab': lambda: DABPool(
             channels, channels, # DABPool handles in/out channels, but often keeps dim or uses 1x1 proj separately
@@ -36,6 +39,7 @@ def get_aa_layer(
             depth_index=depth_index,
             dab_controller=dab_controller
         ),
+        'pasa': lambda: Downsample_PASA_group_softmax(channels, filter_size, stride, group=pasa_group),
     }
 
     # .get() returns None if key doesn't exist, triggering the fallback
