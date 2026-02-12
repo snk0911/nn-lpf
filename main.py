@@ -177,6 +177,9 @@ def main():
     if args.aa_type == 'blur':
         print(f"filter_size: {args.filter_size}")
         subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
+    elif args.aa_type == 'soft':
+        print(f"filter_size: {args.filter_size}")
+        subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
     elif args.aa_type == 'dab':
         print(f"filter_size: {args.filter_size}")
         subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
@@ -193,15 +196,19 @@ def main():
     elif args.aa_type == 'none':
         subdir = f"{args.arch}_baseline"
     
-
     args.out_dir = os.path.join(args.out_dir, subdir)
     if(not os.path.exists(args.out_dir)):
         os.makedirs(args.out_dir)
 
     if args.seed is not None:
+        # https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
         random.seed(args.seed)
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         warnings.warn('You have chosen to seed training. '
                       'This will turn on the CUDNN deterministic setting, '
@@ -210,8 +217,7 @@ def main():
                       'from checkpoints.')
 
     if args.gpu is not None:
-        warnings.warn('You have chosen a specific GPU. This will completely '
-                      'disable data parallelism.')
+        warnings.warn('You have chosen a specific GPU. This will completely disable data parallelism.')
 
     if args.dist_url == "env://" and args.world_size == -1:
         args.world_size = int(os.environ["WORLD_SIZE"])
@@ -256,6 +262,10 @@ def main_worker(gpu, ngpus_per_node, args):
         model = models.__dict__[args.arch](num_classes=200)
         num_classes_in_model = model.fc.out_features
         print(f"Model has {num_classes_in_model} classes at output.")
+
+        out_channels = model.conv1.out_channels
+        model.conv1 = nn.Conv2d(3, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        print("Replaced conv1 with 3x3 stride 1 for CIFAR/Tiny-ImageNet-Style.")
     else:
         model = aa_models.__dict__[args.arch](
             aa_type=args.aa_type,
@@ -316,11 +326,14 @@ def main_worker(gpu, ngpus_per_node, args):
     # criterion = nn.CrossEntropyLoss().cuda(args.gpu)
     # after tests baseline accuracy improves by roughly more than 1% @1 @5
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing).cuda(args.gpu)
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay,
-                                # added for ResNet-18 training; probably args needed; mentioned in Tiny-ImageNet-Paper
-                                nesterov=True)
+    optimizer = torch.optim.SGD(
+        model.parameters(), 
+        args.lr,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay,
+        # added for ResNet-18 training; probably args needed; mentioned in Tiny-ImageNet-Paper
+        nesterov=True
+    )
 
     # optionally resume from a checkpoint
     if args.resume:

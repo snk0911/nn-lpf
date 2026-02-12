@@ -1,0 +1,64 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+from .blur import BlurPool
+from .soft import PerChannelSoftPool
+from .dwt import DWT_2D_tiny
+from .dab import DABPool
+from .pasa import Downsample_PASA_group_softmax
+
+
+# ---------------------------------------------------------
+# helper functions
+# ---------------------------------------------------------
+def get_aa_layer(
+    channels: int,
+    stride: int,
+    aa_type: str,
+    wavelet_type: str,
+    filter_size: int,
+    pasa_group: int,
+    dab_controller=None,
+    depth_index=None
+) -> nn.Module:
+
+    if stride == 1:
+        return nn.Identity()
+
+    # Map strings to lambda functions that instantiate the layers
+    layer_registry: Dict[str, Callable[[], nn.Module]] = {
+        'avg': lambda: nn.AvgPool2d(
+            kernel_size=filter_size,
+            stride=stride,
+            padding=filter_size // 2
+        ),
+        'blur': lambda: BlurPool(channels, filter_size=filter_size, stride=stride),
+        'soft': lambda: PerChannelSoftPool(channels, kernel_size=filter_size, stride=stride),
+        'dwt': lambda: DWT_2D_tiny(wavelet_type),
+        'dab': lambda: DABPool(
+            channels, channels, # DABPool handles in/out channels, but often keeps dim or uses 1x1 proj separately
+            kernel_size=3, stride=stride, padding=1,
+            depth_index=depth_index,
+            dab_controller=dab_controller
+        ),
+        'pasa': lambda: Downsample_PASA_group_softmax(channels, filter_size, stride, group=pasa_group),
+    }
+
+    # .get() returns None if key doesn't exist, triggering the fallback
+    layer_factory = layer_registry.get(aa_type)
+
+    return layer_factory() if layer_factory else nn.Identity()
+
+
+def get_pad_layer(pad_type):
+    if(pad_type in ['refl','reflect']):
+        PadLayer = nn.ReflectionPad2d
+    elif(pad_type in ['repl','replicate']):
+        PadLayer = nn.ReplicationPad2d
+    elif(pad_type=='zero'):
+        PadLayer = nn.ZeroPad2d
+    else:
+        raise ValueError(f'Pad type [{pad_type}] not recognized')
+    return PadLayer

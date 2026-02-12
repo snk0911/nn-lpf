@@ -5,47 +5,8 @@ from torch import Tensor
 import torch.utils.model_zoo as model_zoo
 from .lpf_layers import *
 
+
 __all__ = ['ResNet', 'resnet18']
-
-# ---------------------------------------------------------
-# helper functions
-# ---------------------------------------------------------
-def get_aa_layer(
-    channels: int,
-    stride: int,
-    aa_type: str,
-    wavelet_type: str,
-    filter_size: int,
-    pasa_group: int,
-    dab_controller=None,  # Added this argument
-    depth_index=None      # Added this argument
-) -> nn.Module:
-    if stride == 1:
-        return nn.Identity()
-
-    # Map strings to lambda functions that instantiate the layers
-    layer_registry: Dict[str, Callable[[], nn.Module]] = {
-        'blur': lambda: BlurPool(channels, filter_size=filter_size, stride=stride),
-        'avg': lambda: nn.AvgPool2d(
-            kernel_size=filter_size,
-            stride=stride,
-            padding=filter_size // 2
-        ),
-        'softpool': lambda: PerChannelSoftPool(channels, kernel_size=filter_size, stride=stride),
-        'dwt': lambda: DWT_2D_tiny(wavelet_type),
-        'dab': lambda: DABPool(
-            channels, channels, # DABPool handles in/out channels, but often keeps dim or uses 1x1 proj separately
-            kernel_size=3, stride=stride, padding=1,
-            depth_index=depth_index,
-            dab_controller=dab_controller
-        ),
-        'pasa': lambda: Downsample_PASA_group_softmax(channels, filter_size, stride, group=pasa_group),
-    }
-
-    # .get() returns None if key doesn't exist, triggering the fallback
-    layer_factory = layer_registry.get(aa_type)
-
-    return layer_factory() if layer_factory else nn.Identity()
 
 
 def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
@@ -81,30 +42,40 @@ class BasicBlock(nn.Module):
             raise ValueError('BasicBlock only supports groups=1 and base_width=64')
         if dilation > 1:
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        
+        # Retrieve the requested AA layer using the helper
+        # We pass 'inplanes' because the pooling happens on the input channels
+        aa_layer = get_aa_layer(
+            channels=inplanes, 
+            stride=stride, 
+            aa_type=aa_type, 
+            wavelet_type=wavelet_type, 
+            filter_size=filter_size, 
+            pasa_group=pasa_group,
+            dab_controller=dab_controller,
+            depth_index=depth_index
+        )
 
-        # --- AA Logic on CONV1 ---
-        # In ResNet V1.5 (BasicBlock), stride is in conv1.
-        aa_layer = get_aa_layer(inplanes, stride, aa_type, wavelet_type, filter_size, pasa_group,
-                                dab_controller=dab_controller, depth_index=depth_index)
-        is_identity = isinstance(aa_layer, nn.Identity)
-
-        if is_identity:
-            # Baseline: Standard Conv3x3 with stride
+        # Check if the returned layer is Identity
+        # This happens if stride=1 OR if aa_type is 'none' (baseline)
+        if isinstance(aa_layer, nn.Identity):
+            # BASELINE CASE: Standard Conv with stride
             self.conv1 = conv3x3(inplanes, planes, stride)
         else:
-            # AA Method: AA Layer handles stride, Conv3x3 is stride 1
+            # AA CASE: AA Layer handles stride, Conv is stride 1
             self.conv1 = nn.Sequential(
                 aa_layer,
-                conv3x3(inplanes, planes, 1)
+                conv3x3(inplanes, planes, stride=1)
             )
 
         self.bn1 = norm_layer(planes)
+
         self.relu = AARelu() if aa_type == 'dab' else nn.ReLU(inplace=True)
 
         # --- CONV2 is always stride 1 ---
         self.conv2 = conv3x3(planes, planes)
+
         self.bn2 = norm_layer(planes)
-        
         self.downsample = downsample
         self.stride = stride
 
@@ -245,40 +216,36 @@ class ResNet(nn.Module):
         def get_aa_helper(c, s, d_idx=None):
             return get_aa_layer(c, s, self.aa_type, self.wavelet_type, self.filter_size, self.pasa_group,
                                 dab_controller=self.dab_controller, depth_index=d_idx)
-
+        
         # --- Head Configuration ---
         aa_head_check = get_aa_helper(self.inplanes, 2)
         is_identity = isinstance(aa_head_check, nn.Identity)
 
+        # borrowed from CIFAR RESNET implementation even tho maxpool was removed from there while we keep it here
+        # @inproceedings{he2016identity,
+        #     title={Identity mappings in deep residual networks},
+        #     author={He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
+        #     booktitle={European conference on computer vision},
+        #     pages={630--645},
+        #     year={2016},
+        #     organization={Springer}
+        #     }
+        # 1.5 default
+        # self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+        # CIFAR-Style/Tiny-ImageNet
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
+
         if is_identity:
-            # borrowed from CIFAR RESNET implementation
-            # @inproceedings{he2016identity,
-            #     title={Identity mappings in deep residual networks},
-            #     author={He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
-            #     booktitle={European conference on computer vision},
-            #     pages={630--645},
-            #     year={2016},
-            #     organization={Springer}
-            #     }
-            # 1.5 default
-            # self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
-            # CIFAR-Style/Tiny-ImageNet
-            self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
-
-            self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+            self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         else:
-            # Repeated
-            # CIFAR-Style/Tiny-ImageNet
-            self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
-
             if pool_only:
                 aa_1 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
                 aa_2 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
-                self.maxpool = nn.Sequential(nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa_2)
+                self.pool = nn.Sequential(nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa_2)
             else:
                 aa_1 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
                 aa_2 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
-                self.maxpool = nn.Sequential(aa_1, nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa_2)
+                self.pool = nn.Sequential(aa_1, nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa_2)
 
         self.bn1 = norm_layer(self.inplanes)
 
@@ -301,6 +268,9 @@ class ResNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+        # Zero-initialize the last BN in each residual branch,
+        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
+        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
         if zero_init_residual:
             for m in self.modules():
                 if isinstance(m, Bottleneck) and m.bn3.weight is not None:
@@ -357,8 +327,7 @@ class ResNet(nn.Module):
         x = self.bn1(x)
         x = self.relu(x)
         
-        # CIFAR-Style/Tiny-ImageNet
-        # x = self.maxpool(x)
+        x = self.pool(x)
 
         x = self.layer1(x)
         x = self.layer2(x)

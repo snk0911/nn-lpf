@@ -5,20 +5,8 @@ import math
 import numpy as np
 import cv2
 
-def get_pad_layer(pad_type):
-    if(pad_type in ['refl','reflect']):
-        PadLayer = nn.ReflectionPad2d
-    elif(pad_type in ['repl','replicate']):
-        PadLayer = nn.ReplicationPad2d
-    elif(pad_type=='zero'):
-        PadLayer = nn.ZeroPad2d
-    else:
-        raise ValueError(f'Pad type [{pad_type}] not recognized')
-    return PadLayer
-
 
 class Downsample_PASA_group_softmax(nn.Module):
-
     def __init__(self, in_channels, kernel_size, stride=1, pad_type='reflect', group=2):
         super(Downsample_PASA_group_softmax, self).__init__()
         self.pad = get_pad_layer(pad_type)(kernel_size//2)
