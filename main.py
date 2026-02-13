@@ -210,14 +210,16 @@ def main():
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        warnings.warn('You have chosen to seed training. '
-                      'This will turn on the CUDNN deterministic setting, '
-                      'which can slow down your training considerably! '
-                      'You may see unexpected behavior when restarting '
-                      'from checkpoints.')
+        warnings.warn(
+            '\nYou have chosen to seed training.\n'  # <-- Add \n here
+            'This will turn on the CUDNN deterministic setting,\n'
+            'which can slow down your training considerably!\n'
+            'You may see unexpected behavior when restarting\n'
+            'from checkpoints.'
+        )
 
     if args.gpu is not None:
-        warnings.warn('You have chosen a specific GPU. This will completely disable data parallelism.')
+        warnings.warn('\nYou have chosen a specific GPU. \nThis will completely disable data parallelism.')
 
     if args.dist_url == "env://" and args.world_size == -1:
         args.world_size = int(os.environ["WORLD_SIZE"])
