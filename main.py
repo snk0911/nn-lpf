@@ -10,6 +10,7 @@ import os
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -132,13 +133,13 @@ parser.add_argument('--no-data-aug', dest='no_data_aug', action='store_true',
 parser.add_argument('--output', dest='out_dir', default='./out', type=str,
                     help='output directory')
 
-parser.add_argument('-es', '--evaluate-shift', dest='evaluate_shift', action='store_true',
+parser.add_argument('-es', '--evaluate_shift', dest='evaluate_shift', action='store_true',
                     help='evaluate model on shift-invariance')
 
 parser.add_argument('--epochs-shift', default=5, type=int, metavar='N',
                     help='number of total epochs to run for shift-invariance test')
 
-parser.add_argument('-ed', '--evaluate-diagonal', dest='evaluate_diagonal', action='store_true',
+parser.add_argument('-ed', '--evaluate_diagonal', dest='evaluate_diagonal', action='store_true',
                     help='evaluate model on diagonal')
 
 parser.add_argument('-ba', '--batch-accum', default=1, type=int,
@@ -452,7 +453,7 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.val_debug:
         if args.eval_test:
             # This throws an error and stops the script immediately
-            raise ValueError("Conflict: --val-debug cannot be used together with --eval_test.")
+            raise ValueError("Conflict: --val_debug cannot be used together with --eval_test.")
         
         # If we get here, it is safe to train on val
         print("DEBUG MODE: Training on Validation Set")
@@ -747,6 +748,83 @@ def evaluate_shift(eval_loader, model, args):
               .format(consist=consist))
 
     return consist.avg
+
+
+# def evaluate_shift(eval_loader, model, args):
+#     batch_time = AverageMeter()
+#     cos_sim_meter = AverageMeter()
+#     consist_meter = AverageMeter() # Keeping agreement for comparison
+
+#     model.eval()
+
+#     # Tiny ImageNet is 64x64.
+#     # We need to pad the images to allow shifting without going out of bounds.
+#     # Padding of 16 pixels allows shifts up to 16 pixels in any direction.
+#     pad_size = 16 
+
+#     with torch.no_grad():
+#         end = time.time()
+#         # args.epochs_shift usually defines how many times to loop over the dataset
+#         for ep in range(args.epochs_shift):
+#             for i, (input, target) in enumerate(eval_loader):
+#                 if args.gpu is not None:
+#                     input = input.cuda(args.gpu, non_blocking=True)
+#                 target = target.cuda(args.gpu, non_blocking=True)
+
+#                 # --- 1. Padding for Tiny ImageNet ---
+#                 # Input size: (B, 3, 64, 64)
+#                 # Padded size: (B, 3, 96, 96) -> 64 + 16 + 16
+#                 input_padded = F.pad(input, (pad_size, pad_size, pad_size, pad_size), mode='reflect')
+
+#                 # --- 2. Generate Random Shifts ---
+#                 # We randomly select two different views (shifts) from the padded image
+#                 # The max offset is pad_size * 2 (32)
+#                 off0 = np.random.randint(pad_size * 2, size=2)
+#                 off1 = np.random.randint(pad_size * 2, size=2)
+
+#                 # --- 3. Cropping ---
+#                 # Extract the 64x64 patches based on offsets
+#                 crop0 = input_padded[:, :, off0[0] : off0[0]+64, off0[1] : off0[1]+64]
+#                 crop1 = input_padded[:, :, off1[0] : off1[0]+64, off1[1] : off1[1]+64]
+
+#                 # --- 4. Forward Pass ---
+#                 # Get logits (output before softmax usually)
+#                 output0 = model(crop0)
+#                 output1 = model(crop1)
+
+#                 # --- 5. Calculate Metrics ---
+                
+#                 # A. Cosine Similarity (The "Smooth" Metric)
+#                 # Compares the direction of the output vectors.
+#                 # Result is between -1 and 1. Higher is better.
+#                 # dim=1 calculates similarity across the class dimension
+#                 cur_sim = F.cosine_similarity(output0, output1, dim=1)
+#                 cos_sim_meter.update(cur_sim.mean().item(), input.size(0))
+
+#                 # B. Agreement (The "Hard" Metric - Optional but good to have)
+#                 # Checks if the predicted class is exactly the same
+#                 pred0 = output0.argmax(dim=1)
+#                 pred1 = output1.argmax(dim=1)
+#                 cur_agree = (pred0 == pred1).float().mean()
+#                 consist_meter.update(cur_agree.item(), input.size(0))
+
+#                 # measure elapsed time
+#                 batch_time.update(time.time() - end)
+#                 end = time.time()
+
+#                 if i % args.print_freq == 0:
+#                     print('Ep [{0}/{1}]:\t'
+#                           'Test: [{2}/{3}]\t'
+#                           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+#                           'CosSim {cos.val:.4f} ({cos.avg:.4f})\t'
+#                           'Agree {cons.val:.4f} ({cons.avg:.4f})\t'.format(
+#                            ep, args.epochs_shift, i, len(eval_loader), 
+#                            batch_time=batch_time, cos=cos_sim_meter, cons=consist_meter))
+
+#         print(' * Cosine Similarity {cos.avg:.3f} Agreement {cons.avg:.3f}'
+#               .format(cos=cos_sim_meter, cons=consist_meter))
+
+#     return cos_sim_meter.avg, consist_meter.avg
 
 
 def evaluate_diagonal(eval_loader, model, args):

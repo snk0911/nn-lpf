@@ -1,13 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-from .blur import BlurPool
-from .soft import PerChannelSoftPool
-from .dwt import DWT_2D_tiny
-from .dab import DABPool
-from .pasa import Downsample_PASA_group_softmax
+from typing import Dict, Callable
 
 
 # ---------------------------------------------------------
@@ -23,6 +17,12 @@ def get_aa_layer(
     dab_controller=None,
     depth_index=None
 ) -> nn.Module:
+
+    from .blur import BlurPool
+    from .soft import PerChannelSoftPool
+    from .dwt import DWT_2D_tiny
+    from .dab import DABPool
+    from .pasa import Downsample_PASA_group_softmax
 
     if stride == 1:
         return nn.Identity()
