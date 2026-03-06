@@ -28,10 +28,12 @@ model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
-parser = argparse.ArgumentParser(description='PyTorch Tiny ImageNet Training')
+parser = argparse.ArgumentParser(description='Evaluating Shift and Corruption-Robustness on CNNs with TinyImageNet(-C) dataset')
 
 parser.add_argument('--data', metavar='DIR', default='./dataset/tiny-imagenet-200',
                     help='path to dataset')
+parser.add_argument('--data_c', metavar='DIR', default='./dataset/tiny-imagenet-c',
+                    help='path to corruption dataset (Tiny ImageNet-C)')
 
 parser.add_argument('--arch', metavar='ARCH', default='resnet18',
                     help='model architecture: ' +
@@ -112,7 +114,7 @@ parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
 
-parser.add_argument('--seed', default=None, type=int,
+parser.add_argument('--seed', default=1, type=int,
                     help='seed for initializing training. ')
 
 parser.add_argument('--gpu', default=0, type=int, help='GPU id to use.')
@@ -135,12 +137,13 @@ parser.add_argument('--output', dest='out_dir', default='./out', type=str,
 
 parser.add_argument('-es', '--evaluate_shift', dest='evaluate_shift', action='store_true',
                     help='evaluate model on shift-invariance')
+parser.add_argument('-ed', '--evaluate_diagonal', dest='evaluate_diagonal', action='store_true',
+                    help='evaluate model on diagonal')
+parser.add_argument('--evaluate_c', action='store_true',
+                    help='Evaluate mCE on Tiny ImageNet-C')
 
 parser.add_argument('--epochs-shift', default=5, type=int, metavar='N',
                     help='number of total epochs to run for shift-invariance test')
-
-parser.add_argument('-ed', '--evaluate_diagonal', dest='evaluate_diagonal', action='store_true',
-                    help='evaluate model on diagonal')
 
 parser.add_argument('-ba', '--batch-accum', default=1, type=int,
                     metavar='N',
@@ -371,28 +374,6 @@ def main_worker(gpu, ngpus_per_node, args):
     # Done to replicate the full ImageNet-1k scenario
 
     normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2764, 0.2689, 0.2816])
-    # normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975],
-    #                                  std=[0.2302, 0.2265, 0.2262])
-
-    # if(args.no_data_aug):
-    #     train_dataset = datasets.ImageFolder(
-    #         train_dir,
-    #         transforms.Compose([
-    #             transforms.Resize(72),
-    #             transforms.CenterCrop(64),
-    #             transforms.RandomHorizontalFlip(),
-    #             transforms.ToTensor(),
-    #             normalize,
-    #         ]))
-    # else:
-    #     train_dataset = datasets.ImageFolder(
-    #         train_dir,
-    #         transforms.Compose([
-    #             transforms.RandomResizedCrop(64),
-    #             transforms.RandomHorizontalFlip(),
-    #             transforms.ToTensor(),
-    #             normalize,
-    #         ]))
 
     if args.no_data_aug:
         train_dataset = datasets.ImageFolder(
@@ -407,7 +388,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset = datasets.ImageFolder(
             train_dir,
             transforms.Compose([
-                transforms.RandomCrop(64, padding=8), 
+                transforms.RandomCrop(64, padding=8, padding_mode='reflect'), 
                 transforms.RandomHorizontalFlip(),
                 transforms.ToTensor(),
                 normalize,
@@ -432,18 +413,10 @@ def main_worker(gpu, ngpus_per_node, args):
         chosen_eval_dir = val_dir
         print("Using validation dataset for evaluation.")
 
-    # eval_loader= torch.utils.data.DataLoader(
-    #     datasets.ImageFolder(chosen_eval_dir, transforms.Compose([
-    #         transforms.Resize(72),
-    #         transforms.CenterCrop(crop_size),
-    #         transforms.ToTensor(),
-    #         normalize,
-    #     ])),
-    #     batch_size=args.batch_size, shuffle=False,
-    #     num_workers=args.workers, pin_memory=True)
-
     eval_loader= torch.utils.data.DataLoader(
         datasets.ImageFolder(chosen_eval_dir, transforms.Compose([
+            transforms.Resize(72, interpolation=transforms.InterpolationMode.NEAREST),
+            transforms.CenterCrop(crop_size),
             transforms.ToTensor(),
             normalize,
         ])),
@@ -491,6 +464,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if(args.evaluate_diagonal):
         evaluate_diagonal(eval_loader, model, args)
+        return
+
+    if args.evaluate_c:
+        evaluate_c(eval_loader, model, criterion, args)
         return
 
     if(args.evaluate_save):
@@ -892,6 +869,73 @@ def evaluate_diagonal(eval_loader, model, args):
     np.save(os.path.join(args.out_dir,'diag_probs2'),diag_probs2)
     np.save(os.path.join(args.out_dir,'diag_corrs'),diag_corrs)
     np.save(os.path.join(args.out_dir,'diag_preds'),diag_preds)
+
+
+def evaluate_c(eval_loader, model, criterion, args):
+    distortions = [
+        'gaussian_noise', 'shot_noise', 'impulse_noise',
+        'defocus_blur', 'glass_blur', 'motion_blur', 'zoom_blur',
+        'snow', 'frost', 'fog', 'brightness',
+        'contrast', 'elastic_transform', 'pixelate', 'jpeg_compression',
+    ]
+
+    error_rates = []
+
+    # First get clean error on val set
+    print('\nComputing clean error...')
+    acc1, _ = evaluate(eval_loader, model, criterion, args)
+    clean_error = 1. - acc1.item() / 100.
+    print('Clean error: {:.2f}%'.format(100 * clean_error))
+
+    model.eval()
+
+    for distortion_name in distortions:
+        severity_errors = []
+
+        for severity in range(1, 6):
+            top1 = AverageMeter()
+
+            new_root = os.path.join(args.data_c, distortion_name, str(severity))
+            eval_loader.dataset.root = new_root
+            eval_loader.dataset.samples = datasets.ImageFolder(new_root).samples
+            eval_loader.dataset.imgs = eval_loader.dataset.samples
+
+            with torch.no_grad():
+                for i, (input, target) in enumerate(eval_loader):
+                    if args.gpu is not None:
+                        input = input.cuda(args.gpu, non_blocking=True)
+                    target = target.cuda(args.gpu, non_blocking=True)
+
+                    output = model(input)
+                    acc1, _ = accuracy(output, target, topk=(1, 5))
+                    top1.update(acc1[0], input.size(0))
+
+                    if i % args.print_freq == 0:
+                        print('Distortion: {:20s} | Severity: [{:d}] [{:d}/{:d}]\t'
+                              'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
+                               distortion_name, severity, i, len(eval_loader), top1=top1))
+
+            severity_errors.append(1. - top1.avg.item() / 100.)
+
+        raw_err = np.mean(severity_errors)
+        error_rates.append(raw_err)
+
+        print('Distortion: {:20s} | Raw Error (%): {:.2f}'.format(
+            distortion_name, 100 * raw_err))
+
+    mce = 100 * np.mean(error_rates)
+
+    print('\n * Clean Error:  {:.2f}%'.format(100 * clean_error))
+    print(' * mCE:          {:.2f}%'.format(mce))
+
+    if args.wandb:
+        import wandb
+        wandb.log({
+            'clean_error': 100 * clean_error,
+            'mCE':         mce,
+        })
+
+    return mce
 
 
 def evaluate_save(eval_loader, mean, std, args):

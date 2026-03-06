@@ -19,9 +19,7 @@ def get_aa_layer(
 ) -> nn.Module:
 
     from .blur import BlurPool
-    from .soft import PerChannelSoftPool
     from .dwt import DWT_2D_tiny
-    from .dab import DABPool
     from .pasa import Downsample_PASA_group_softmax
 
     if stride == 1:
@@ -35,14 +33,7 @@ def get_aa_layer(
             padding=filter_size // 2
         ),
         'blur': lambda: BlurPool(channels, filter_size=filter_size, stride=stride),
-        'soft': lambda: PerChannelSoftPool(channels, kernel_size=filter_size, stride=stride),
         'dwt': lambda: DWT_2D_tiny(wavelet_type),
-        'dab': lambda: DABPool(
-            channels, channels, # DABPool handles in/out channels, but often keeps dim or uses 1x1 proj separately
-            kernel_size=3, stride=stride, padding=1,
-            depth_index=depth_index,
-            dab_controller=dab_controller
-        ),
         'pasa': lambda: Downsample_PASA_group_softmax(channels, filter_size, stride, group=pasa_group),
     }
 
