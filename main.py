@@ -687,8 +687,8 @@ def evaluate(eval_loader, model, criterion, args):
 def evaluate_shift(eval_loader, model, args):
     batch_time = AverageMeter()
     consist = AverageMeter()
+    cosine = AverageMeter()
 
-    # switch to evaluate mode
     model.eval()
 
     with torch.no_grad():
@@ -699,18 +699,24 @@ def evaluate_shift(eval_loader, model, args):
                     input = input.cuda(args.gpu, non_blocking=True)
                 target = target.cuda(args.gpu, non_blocking=True)
 
-                off0 = np.random.randint(32,size=2)
-                off1 = np.random.randint(32,size=2)
+                off0 = np.random.randint(8, size=2)
+                off1 = np.random.randint(8, size=2)
 
                 output0 = model(input[:,:,off0[0]:off0[0]+64,off0[1]:off0[1]+64])
                 output1 = model(input[:,:,off1[0]:off1[0]+64,off1[1]:off1[1]+64])
 
+                # Binary shift consistency
                 cur_agree = agreement(output0, output1).type(torch.FloatTensor).to(output0.device)
-
-                # measure agreement and record
                 consist.update(cur_agree.item(), input.size(0))
+                
+                # In addition to binary shift-consistency, cosine similarity between the softmax output vectors of shifted image pairs is measured to capture the degree of prediction stability beyond top-1 agreement. 
+                # Unlike binary consistency, cosine similarity reflects how similar the full probability distribution is across all 200 classes for two shifted versions of the same image.
+                # Cosine similarity between probability distributions
+                prob0 = torch.nn.Softmax(dim=1)(output0)
+                prob1 = torch.nn.Softmax(dim=1)(output1)
+                cur_cosine = torch.nn.functional.cosine_similarity(prob0, prob1, dim=1).mean()
+                cosine.update(cur_cosine.item(), input.size(0))
 
-                # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
 
@@ -718,90 +724,15 @@ def evaluate_shift(eval_loader, model, args):
                     print('Ep [{0}/{1}]:\t'
                           'Test: [{2}/{3}]\t'
                           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                          'Consist {consist.val:.4f} ({consist.avg:.4f})\t'.format(
-                           ep, args.epochs_shift, i, len(eval_loader), batch_time=batch_time, consist=consist))
+                          'Consist {consist.val:.4f} ({consist.avg:.4f})\t'
+                          'Cosine {cosine.val:.4f} ({cosine.avg:.4f})\t'.format(
+                           ep, args.epochs_shift, i, len(eval_loader),
+                           batch_time=batch_time, consist=consist, cosine=cosine))
 
-        print(' * Consistency {consist.avg:.3f}'
-              .format(consist=consist))
+        print(' * Consistency {consist.avg:.3f} Cosine {cosine.avg:.3f}'
+              .format(consist=consist, cosine=cosine))
 
-    return consist.avg
-
-
-# def evaluate_shift(eval_loader, model, args):
-#     batch_time = AverageMeter()
-#     cos_sim_meter = AverageMeter()
-#     consist_meter = AverageMeter() # Keeping agreement for comparison
-
-#     model.eval()
-
-#     # Tiny ImageNet is 64x64.
-#     # We need to pad the images to allow shifting without going out of bounds.
-#     # Padding of 16 pixels allows shifts up to 16 pixels in any direction.
-#     pad_size = 16 
-
-#     with torch.no_grad():
-#         end = time.time()
-#         # args.epochs_shift usually defines how many times to loop over the dataset
-#         for ep in range(args.epochs_shift):
-#             for i, (input, target) in enumerate(eval_loader):
-#                 if args.gpu is not None:
-#                     input = input.cuda(args.gpu, non_blocking=True)
-#                 target = target.cuda(args.gpu, non_blocking=True)
-
-#                 # --- 1. Padding for Tiny ImageNet ---
-#                 # Input size: (B, 3, 64, 64)
-#                 # Padded size: (B, 3, 96, 96) -> 64 + 16 + 16
-#                 input_padded = F.pad(input, (pad_size, pad_size, pad_size, pad_size), mode='reflect')
-
-#                 # --- 2. Generate Random Shifts ---
-#                 # We randomly select two different views (shifts) from the padded image
-#                 # The max offset is pad_size * 2 (32)
-#                 off0 = np.random.randint(pad_size * 2, size=2)
-#                 off1 = np.random.randint(pad_size * 2, size=2)
-
-#                 # --- 3. Cropping ---
-#                 # Extract the 64x64 patches based on offsets
-#                 crop0 = input_padded[:, :, off0[0] : off0[0]+64, off0[1] : off0[1]+64]
-#                 crop1 = input_padded[:, :, off1[0] : off1[0]+64, off1[1] : off1[1]+64]
-
-#                 # --- 4. Forward Pass ---
-#                 # Get logits (output before softmax usually)
-#                 output0 = model(crop0)
-#                 output1 = model(crop1)
-
-#                 # --- 5. Calculate Metrics ---
-                
-#                 # A. Cosine Similarity (The "Smooth" Metric)
-#                 # Compares the direction of the output vectors.
-#                 # Result is between -1 and 1. Higher is better.
-#                 # dim=1 calculates similarity across the class dimension
-#                 cur_sim = F.cosine_similarity(output0, output1, dim=1)
-#                 cos_sim_meter.update(cur_sim.mean().item(), input.size(0))
-
-#                 # B. Agreement (The "Hard" Metric - Optional but good to have)
-#                 # Checks if the predicted class is exactly the same
-#                 pred0 = output0.argmax(dim=1)
-#                 pred1 = output1.argmax(dim=1)
-#                 cur_agree = (pred0 == pred1).float().mean()
-#                 consist_meter.update(cur_agree.item(), input.size(0))
-
-#                 # measure elapsed time
-#                 batch_time.update(time.time() - end)
-#                 end = time.time()
-
-#                 if i % args.print_freq == 0:
-#                     print('Ep [{0}/{1}]:\t'
-#                           'Test: [{2}/{3}]\t'
-#                           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-#                           'CosSim {cos.val:.4f} ({cos.avg:.4f})\t'
-#                           'Agree {cons.val:.4f} ({cons.avg:.4f})\t'.format(
-#                            ep, args.epochs_shift, i, len(eval_loader), 
-#                            batch_time=batch_time, cos=cos_sim_meter, cons=consist_meter))
-
-#         print(' * Cosine Similarity {cos.avg:.3f} Agreement {cons.avg:.3f}'
-#               .format(cos=cos_sim_meter, cons=consist_meter))
-
-#     return cos_sim_meter.avg, consist_meter.avg
+    return consist.avg, cosine.avg
 
 
 def evaluate_diagonal(eval_loader, model, args):
