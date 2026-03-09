@@ -61,6 +61,7 @@ def generate_zone_plate(size=512):
 
     return plate_np, plate_tensor
 
+
 def load_aa_model(weights_path, aa_type, filter_size=5, wavelet_type='haar',
                   pasa_group=2, gpu=None):
     model = aa_models.resnet18(
@@ -101,7 +102,6 @@ def run_through_pool(model, zone_plate_tensor, gpu=None):
     return out
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     # Zone plate — size controlled by ZONE_PLATE_SIZE in config
     # 512 for presentation, 256 for thesis PDF
@@ -146,7 +146,7 @@ def main():
         outputs[name] = out
         print(f"  {name}: output shape {out.shape}")
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
+    # Plot
     n_models = len(model_configs)
     fig, axes = plt.subplots(1, n_models + 1,
                              figsize=(3.5 * (n_models + 1), 4))

@@ -68,15 +68,6 @@ parser.add_argument("--lr_step_size", default=30, type=int, help="decrease lr ev
 parser.add_argument("--lr_gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
 parser.add_argument("--lr_min", default=0.0, type=float, help="minimum lr of lr schedule (default: 0.0)")
 
-
-parser.add_argument(
-    "--label_smoothing",
-    default=0.1,
-    type=float,
-    metavar="S",
-    help="label smoothing",
-)
-
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 
@@ -328,10 +319,7 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
-    # "As proposed by Szegedy et al. (2016) and analyzed in detail by Müller et al. (2019), label smoothing serves as a regularization technique that prevents overconfidence and improves both model calibration and generalization."
-    # criterion = nn.CrossEntropyLoss().cuda(args.gpu)
-    # after tests baseline accuracy improves by roughly more than 1% @1 @5
-    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing).cuda(args.gpu)
+    criterion = nn.CrossEntropyLoss().cuda(args.gpu)
     optimizer = torch.optim.SGD(
         model.parameters(), 
         args.lr,
@@ -375,24 +363,16 @@ def main_worker(gpu, ngpus_per_node, args):
 
     normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2764, 0.2689, 0.2816])
 
-    if args.no_data_aug:
-        train_dataset = datasets.ImageFolder(
-            train_dir,
-            transforms.Compose([
-                transforms.ToTensor(),
-                normalize,
-            ]))
-    else:
-        # Replaced RandomResizedCrop (blurry) with RandomCrop (sharp).
-        # RandomResizedCrop introduced Blur at dataset level which actually misses the point of checking the influence of low pass filters on network architectures
-        train_dataset = datasets.ImageFolder(
-            train_dir,
-            transforms.Compose([
-                transforms.RandomCrop(64, padding=8, padding_mode='reflect'), 
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                normalize,
-            ]))
+    # training without influence of augmentations
+    train_dataset = datasets.ImageFolder(
+        train_dir,
+        transforms.Compose([
+            transforms.Resize(64),
+            transforms.CenterCrop(64),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize,
+        ]))
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -413,7 +393,7 @@ def main_worker(gpu, ngpus_per_node, args):
         chosen_eval_dir = val_dir
         print("Using validation dataset for evaluation.")
 
-    eval_loader= torch.utils.data.DataLoader(
+    eval_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(chosen_eval_dir, transforms.Compose([
             transforms.Resize(72, interpolation=transforms.InterpolationMode.NEAREST),
             transforms.CenterCrop(crop_size),
@@ -634,6 +614,7 @@ def evaluate(eval_loader, model, criterion, args):
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
+    latency = AverageMeter()  # NEW
 
     # switch to evaluate mode
     model.eval()
@@ -644,6 +625,13 @@ def evaluate(eval_loader, model, criterion, args):
             if args.gpu is not None:
                 input = input.cuda(args.gpu, non_blocking=True)
             target = target.cuda(args.gpu, non_blocking=True)
+
+            # measure network latency (single sample, no batching)  # NEW
+            torch.cuda.synchronize()
+            lat_start = time.time()                                  
+            _ = model(input[:1])                                 
+            torch.cuda.synchronize()                
+            latency.update((time.time() - lat_start) * 1000)   
 
             # compute output
             output = model(input)
@@ -664,9 +652,10 @@ def evaluate(eval_loader, model, criterion, args):
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})\t'
+                      'Latency {latency.val:.2f}ms ({latency.avg:.2f}ms)'.format(
                        i, len(eval_loader), batch_time=batch_time, loss=losses,
-                       top1=top1, top5=top5))
+                       top1=top1, top5=top5, latency=latency))
 
         if args.wandb:
             import wandb
@@ -674,14 +663,15 @@ def evaluate(eval_loader, model, criterion, args):
                 {
                     'val_avg_loss': losses.avg,
                     'val_avg_acc@1': top1.avg,
-                    'val_avg_acc@5': top5.avg
+                    'val_avg_acc@5': top5.avg,
+                    'val_avg_latency_ms': latency.avg
                 },
                 commit=False)
 
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
-              .format(top1=top1, top5=top5))
+        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f} Latency {latency.avg:.2f}ms'
+              .format(top1=top1, top5=top5, latency=latency))
 
-    return top1.avg, losses.avg
+    return top1.avg, losses.avg, latency.avg
 
 
 def evaluate_shift(eval_loader, model, args):
@@ -708,7 +698,7 @@ def evaluate_shift(eval_loader, model, args):
                 # Binary shift consistency
                 cur_agree = agreement(output0, output1).type(torch.FloatTensor).to(output0.device)
                 consist.update(cur_agree.item(), input.size(0))
-                
+
                 # In addition to binary shift-consistency, cosine similarity between the softmax output vectors of shifted image pairs is measured to capture the degree of prediction stability beyond top-1 agreement. 
                 # Unlike binary consistency, cosine similarity reflects how similar the full probability distribution is across all 200 classes for two shifted versions of the same image.
                 # Cosine similarity between probability distributions
@@ -814,7 +804,7 @@ def evaluate_c(eval_loader, model, criterion, args):
 
     # First get clean error on val set
     print('\nComputing clean error...')
-    acc1, _ = evaluate(eval_loader, model, criterion, args)
+    acc1, _, _ = evaluate(eval_loader, model, criterion, args)
     clean_error = 1. - acc1.item() / 100.
     print('Clean error: {:.2f}%'.format(100 * clean_error))
 
@@ -866,7 +856,7 @@ def evaluate_c(eval_loader, model, criterion, args):
             'mCE':         mce,
         })
 
-    return mce
+    return mce, clean_error * 100, [e * 100 for e in error_rates]
 
 
 def evaluate_save(eval_loader, mean, std, args):
