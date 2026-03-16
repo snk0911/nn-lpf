@@ -7,7 +7,7 @@ import warnings
 import sys
 import numpy as np
 import os
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -195,11 +195,13 @@ def main():
     if(not os.path.exists(args.out_dir)):
         os.makedirs(args.out_dir)
 
+    # mentioning this in the Reproducibilty Chapter
     if args.seed is not None:
         # https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
         random.seed(args.seed)
+        np.random.seed(args.seed) # Zhang forgot to add this so validate_shift is deterministic and therefore reproducable
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
         torch.use_deterministic_algorithms(True)
@@ -361,14 +363,12 @@ def main_worker(gpu, ngpus_per_node, args):
     # Therefore, calculating the exact mean and standard deviation for a specific dataset like Tiny ImageNet—rather than relying on generic values—is considered a best practice for maximizing performance (Krizhevsky et al., 2012)."
     # Done to replicate the full ImageNet-1k scenario
 
-    normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2764, 0.2689, 0.2816])
+    normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2764, 0.2689, 0.2816]) # for Tiny-ImageNet
 
-    # training without influence of augmentations
+    # minimal training for Tiny-ImageNet with 64x64 images
     train_dataset = datasets.ImageFolder(
         train_dir,
         transforms.Compose([
-            transforms.Resize(64),
-            transforms.CenterCrop(64),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -395,7 +395,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     eval_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(chosen_eval_dir, transforms.Compose([
-            transforms.Resize(72, interpolation=transforms.InterpolationMode.NEAREST),
+            transforms.Resize(72, interpolation=transforms.InterpolationMode.NEAREST), # InterpolationMode.NEAREST so no additional blur during eval 
             transforms.CenterCrop(crop_size),
             transforms.ToTensor(),
             normalize,
@@ -677,7 +677,7 @@ def evaluate(eval_loader, model, criterion, args):
 def evaluate_shift(eval_loader, model, args):
     batch_time = AverageMeter()
     consist = AverageMeter()
-    cosine = AverageMeter()
+    chord = AverageMeter()
 
     model.eval()
 
@@ -699,14 +699,32 @@ def evaluate_shift(eval_loader, model, args):
                 cur_agree = agreement(output0, output1).type(torch.FloatTensor).to(output0.device)
                 consist.update(cur_agree.item(), input.size(0))
 
-                # In addition to binary shift-consistency, cosine similarity between the softmax output vectors of shifted image pairs is measured to capture the degree of prediction stability beyond top-1 agreement. 
-                # Unlike binary consistency, cosine similarity reflects how similar the full probability distribution is across all 200 classes for two shifted versions of the same image.
-                # Cosine similarity between probability distributions
+                # Chord Distance
+                #
+                # Measures prediction stability under spatial shifts by comparing
+                # the full softmax probability distributions of two shifted crops.
+                # Goes beyond top-1 agreement to capture changes in the entire
+                # confidence profile.
+                #
+                # Given two probability vectors p0 and p1 from softmax outputs:
+                #   1. L2-normalize both vectors onto the unit hypersphere:
+                #      p0' = p0 / ||p0||_2,  p1' = p1 / ||p1||_2
+                #
+                #   2. Compute the Euclidean distance between the normalized vectors:
+                #      d_chord(p0, p1) = ||p0' - p1'||_2 = sqrt(2 - 2*cos(theta))
+                #      where theta is the angle between p0' and p1'.
+                #
+                # Chord distance is a proper metric on the unit hypersphere,
+                # ranging from 0 (identical predictions) to sqrt(2) (maximally
+                # different predictions). Lower values indicate more consistent
+                # predictions under shift.
                 prob0 = torch.nn.Softmax(dim=1)(output0)
                 prob1 = torch.nn.Softmax(dim=1)(output1)
-                cur_cosine = torch.nn.functional.cosine_similarity(prob0, prob1, dim=1).mean()
-                cosine.update(cur_cosine.item(), input.size(0))
-
+                prob0_norm = torch.nn.functional.normalize(prob0, p=2, dim=1)
+                prob1_norm = torch.nn.functional.normalize(prob1, p=2, dim=1)
+                cur_chord = torch.norm(prob0_norm - prob1_norm, p=2, dim=1).mean().item()
+                chord.update(cur_chord, input.size(0))
+                
                 batch_time.update(time.time() - end)
                 end = time.time()
 
@@ -715,15 +733,19 @@ def evaluate_shift(eval_loader, model, args):
                           'Test: [{2}/{3}]\t'
                           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                           'Consist {consist.val:.4f} ({consist.avg:.4f})\t'
-                          'Cosine {cosine.val:.4f} ({cosine.avg:.4f})\t'.format(
+                          'Chord {chord.val:.4f} ({chord.avg:.4f})\t'.format(
                            ep, args.epochs_shift, i, len(eval_loader),
-                           batch_time=batch_time, consist=consist, cosine=cosine))
+                           batch_time=batch_time, consist=consist, chord=chord))
 
-        print(' * Consistency {consist.avg:.3f} Cosine {cosine.avg:.3f}'
-              .format(consist=consist, cosine=cosine))
+        print(' * Consistency {consist.avg:.3f} Chord {chord.avg:.3f}'
+              .format(consist=consist, chord=chord))
 
-    return consist.avg, cosine.avg
+    return consist.avg, chord.avg
 
+# Interessant — die Chord-Ähnlichkeit (83.2) ist höher als die Konsistenz (81.2).
+# Das ergibt Sinn: Die Konsistenz zählt nur binär, ob die Top-1-Vorhersage übereinstimmt. Wenn sie nicht übereinstimmt, gibt es eine 0 — egal wie knapp es war.
+# Aber bei der Chord-Ähnlichkeit kann es sein, dass das Netzwerk bei einem Ausschnitt knapp "Katze" und beim anderen knapp "Hund" vorhersagt. Die Konsistenz sagt dann 0, aber die Verteilungen sind trotzdem fast identisch (z.B. 49% Katze vs. 51% Katze), also bleibt die Chord-Ähnlichkeit hoch.
+# Das heißt: Viele der Fälle, in denen die Top-1-Vorhersage kippt, sind knappe Entscheidungen nahe an der Decision Boundary. Das Netzwerk ist stabiler als die Konsistenz allein vermuten lässt — es ändert nicht grundlegend seine Meinung, sondern schwankt nur bei ohnehin unsicheren Vorhersagen.
 
 def evaluate_diagonal(eval_loader, model, args):
     batch_time = AverageMeter()
@@ -734,7 +756,7 @@ def evaluate_diagonal(eval_loader, model, args):
     # switch to evaluate mode
     model.eval()
 
-    D = 33
+    D = 9
     diag_probs = np.zeros((len(eval_loader.dataset),D))
     diag_probs2 = np.zeros((len(eval_loader.dataset),D)) # save highest probability, not including ground truth
     diag_corrs = np.zeros((len(eval_loader.dataset),D))
@@ -856,7 +878,7 @@ def evaluate_c(eval_loader, model, criterion, args):
             'mCE':         mce,
         })
 
-    return mce, clean_error * 100, [e * 100 for e in error_rates]
+    return mce, clean_error * 100
 
 
 def evaluate_save(eval_loader, mean, std, args):
