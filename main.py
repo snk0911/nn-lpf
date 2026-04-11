@@ -53,13 +53,13 @@ parser.add_argument('-ep', '--epochs', default=90, type=int, metavar='N',
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 
-parser.add_argument('-b', '--batch-size', default=256, type=int,
+parser.add_argument('-b', '--batch-size', default=128, type=int,
                     metavar='N',
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
 
-parser.add_argument('--lr', '--learning_rate', default=0.2, type=float, metavar='LR', help='initial learning rate', dest='lr')
+parser.add_argument('-lr', '--learning_rate', default=0.1, type=float, metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--lr_scheduler', default='cosine', choices=['step', 'cosine','exponential','plateau'], help='learning rate scheduler (default: cosine)')
 parser.add_argument("--lr_warmup_epochs", default=5, type=int, help="the number of epochs to warmup (default: 0)")
 parser.add_argument("--lr-warmup-method", default="linear", type=str, help="the warmup method (default: linear)")
@@ -71,7 +71,7 @@ parser.add_argument("--lr_min", default=0.0, type=float, help="minimum lr of lr 
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 
-parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
+parser.add_argument('-wd', '--weight-decay', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)',
                     dest='weight_decay')
 
@@ -362,8 +362,9 @@ def main_worker(gpu, ngpus_per_node, args):
     # This is crucial because it helps the gradient descent algorithm converge faster and more stably by conditioning the Hessian matrix (LeCun et al., 1998). 
     # Therefore, calculating the exact mean and standard deviation for a specific dataset like Tiny ImageNet—rather than relying on generic values—is considered a best practice for maximizing performance (Krizhevsky et al., 2012)."
     # Done to replicate the full ImageNet-1k scenario
-
-    normalize = transforms.Normalize(mean=[0.4802, 0.4481, 0.3975], std=[0.2764, 0.2689, 0.2816]) # for Tiny-ImageNet
+    mean = [0.4802, 0.4481, 0.3975]
+    std  = [0.2764, 0.2689, 0.2816]
+    normalize = transforms.Normalize(mean=mean, std=std) # for Tiny-ImageNet
 
     # minimal training for Tiny-ImageNet with 64x64 images
     train_dataset = datasets.ImageFolder(
@@ -436,6 +437,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if args.evaluate:
         evaluate(eval_loader, model, criterion, args)
+        eval_latency(model, gpu=args.gpu)  # separate, clean measurement
         return
 
     if(args.evaluate_shift):
@@ -507,7 +509,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train(train_loader, model, criterion, optimizer, epoch, args)
 
         # Evaluate
-        acc1, val_loss = evaluate(eval_loader, model, criterion, args)
+        acc1, val_loss, _ = evaluate(eval_loader, model, criterion, args)
 
         # Step the scheduler
         if args.lr_scheduler == "plateau":
@@ -614,49 +616,36 @@ def evaluate(eval_loader, model, criterion, args):
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
-    latency = AverageMeter()  # NEW
-
-    # switch to evaluate mode
+ 
     model.eval()
-
+ 
     with torch.no_grad():
         end = time.time()
         for i, (input, target) in enumerate(eval_loader):
             if args.gpu is not None:
                 input = input.cuda(args.gpu, non_blocking=True)
             target = target.cuda(args.gpu, non_blocking=True)
-
-            # measure network latency (single sample, no batching)  # NEW
-            torch.cuda.synchronize()
-            lat_start = time.time()                                  
-            _ = model(input[:1])                                 
-            torch.cuda.synchronize()                
-            latency.update((time.time() - lat_start) * 1000)   
-
-            # compute output
+ 
             output = model(input)
             loss = criterion(output, target)
-
-            # measure accuracy and record loss
+ 
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
             losses.update(loss.item(), input.size(0))
             top1.update(acc1[0], input.size(0))
             top5.update(acc5[0], input.size(0))
-
-            # measure elapsed time
+ 
             batch_time.update(time.time() - end)
             end = time.time()
-
+ 
             if i % args.print_freq == 0:
                 print('Test: [{0}/{1}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})\t'
-                      'Latency {latency.val:.2f}ms ({latency.avg:.2f}ms)'.format(
+                      'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                        i, len(eval_loader), batch_time=batch_time, loss=losses,
-                       top1=top1, top5=top5, latency=latency))
-
+                       top1=top1, top5=top5))
+ 
         if args.wandb:
             import wandb
             wandb.log(
@@ -664,14 +653,70 @@ def evaluate(eval_loader, model, criterion, args):
                     'val_avg_loss': losses.avg,
                     'val_avg_acc@1': top1.avg,
                     'val_avg_acc@5': top5.avg,
-                    'val_avg_latency_ms': latency.avg
                 },
                 commit=False)
+ 
+        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
+              .format(top1=top1, top5=top5))
+ 
+    return top1.avg, losses.avg, None
 
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f} Latency {latency.avg:.2f}ms'
-              .format(top1=top1, top5=top5, latency=latency))
 
-    return top1.avg, losses.avg, latency.avg
+def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=10, repetitions=300):
+    """
+    Measures inference latency of a model on a single image.
+    Follows the approach described by Geifman (2020):
+    https://medium.com/data-science/the-correct-way-to-measure-inference-time-of-deep-neural-networks-304a54e5187f
+ 
+    Uses torch.cuda.Event for accurate GPU-native timing.
+    Performs GPU warmup before measurement to avoid initialization overhead.
+ 
+    Args:
+        model:       trained model — must already be on the correct device
+        gpu:         GPU id to use (None for CPU)
+        input_size:  input tensor shape (default: 1 x 3 x 64 x 64 for Tiny ImageNet)
+        warmup:      number of warmup passes before measurement (default: 10)
+        repetitions: number of timed passes to average (default: 300)
+ 
+    Returns:
+        mean_ms: mean latency in milliseconds
+        std_ms:  standard deviation of latency in milliseconds
+    """
+    model.eval()
+ 
+    dummy_input = torch.randn(input_size)
+    if gpu is not None:
+        dummy_input = dummy_input.cuda(gpu)
+ 
+    # CUDA events for accurate GPU-native timing (Geifman, 2020)
+    starter = torch.cuda.Event(enable_timing=True)
+    ender   = torch.cuda.Event(enable_timing=True)
+    timings = np.zeros((repetitions, 1))
+ 
+    # GPU warmup — avoids measuring initialization overhead
+    with torch.no_grad():
+        for _ in range(warmup):
+            _ = model(dummy_input)
+ 
+    # Measure performance
+    with torch.no_grad():
+        for rep in range(repetitions):
+            starter.record()
+            _ = model(dummy_input)
+            ender.record()
+            # Wait for GPU to finish before reading time
+            torch.cuda.synchronize()
+            curr_time = starter.elapsed_time(ender)  # milliseconds
+            timings[rep] = curr_time
+ 
+    mean_ms = float(np.sum(timings) / repetitions)
+    std_ms  = float(np.std(timings))
+ 
+    print(' * Latency {mean:.3f} +/- {std:.3f} ms '
+          '(warmup={warmup}, repetitions={reps})'.format(
+           mean=mean_ms, std=std_ms, warmup=warmup, reps=repetitions))
+ 
+    return mean_ms, std_ms
 
 
 def evaluate_shift(eval_loader, model, args):
@@ -742,10 +787,6 @@ def evaluate_shift(eval_loader, model, args):
 
     return consist.avg, chord.avg
 
-# Interessant — die Chord-Ähnlichkeit (83.2) ist höher als die Konsistenz (81.2).
-# Das ergibt Sinn: Die Konsistenz zählt nur binär, ob die Top-1-Vorhersage übereinstimmt. Wenn sie nicht übereinstimmt, gibt es eine 0 — egal wie knapp es war.
-# Aber bei der Chord-Ähnlichkeit kann es sein, dass das Netzwerk bei einem Ausschnitt knapp "Katze" und beim anderen knapp "Hund" vorhersagt. Die Konsistenz sagt dann 0, aber die Verteilungen sind trotzdem fast identisch (z.B. 49% Katze vs. 51% Katze), also bleibt die Chord-Ähnlichkeit hoch.
-# Das heißt: Viele der Fälle, in denen die Top-1-Vorhersage kippt, sind knappe Entscheidungen nahe an der Decision Boundary. Das Netzwerk ist stabiler als die Konsistenz allein vermuten lässt — es ändert nicht grundlegend seine Meinung, sondern schwankt nur bei ohnehin unsicheren Vorhersagen.
 
 def evaluate_diagonal(eval_loader, model, args):
     batch_time = AverageMeter()
