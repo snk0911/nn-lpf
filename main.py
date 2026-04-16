@@ -191,8 +191,10 @@ def main():
     elif args.aa_type == 'none':
         subdir = f"{args.arch}_baseline"
     
-    args.out_dir = os.path.join(args.out_dir, subdir)
-    if(not os.path.exists(args.out_dir)):
+    args.run_name = build_run_name(args)
+
+    args.out_dir = os.path.join(args.out_dir, args.run_name)
+    if not os.path.exists(args.out_dir):
         os.makedirs(args.out_dir)
 
     # mentioning this in the Reproducibilty Chapter
@@ -528,14 +530,20 @@ def main_worker(gpu, ngpus_per_node, args):
             
             state_dict = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
             
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': state_dict,
-                'best_acc1': best_acc1,
-                'optimizer' : optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(), # CRITICAL: Save scheduler state
-            }, is_best, epoch, out_dir=args.out_dir)
+            save_checkpoint(
+                {
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': state_dict,
+                    'best_acc1': best_acc1,
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                },
+                is_best,
+                epoch,
+                out_dir=args.out_dir,
+                run_name=args.run_name
+            )
 
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
@@ -710,13 +718,12 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=10, repetiti
             timings[rep] = curr_time
  
     mean_ms = float(np.sum(timings) / repetitions)
-    std_ms  = float(np.std(timings))
  
     print(' * Latency {mean:.3f} +/- {std:.3f} ms '
           '(warmup={warmup}, repetitions={reps})'.format(
-           mean=mean_ms, std=std_ms, warmup=warmup, reps=repetitions))
+           mean=mean_ms, warmup=warmup, reps=repetitions))
  
-    return mean_ms, std_ms
+    return mean_ms
 
 
 def evaluate_shift(eval_loader, model, args):
@@ -744,25 +751,6 @@ def evaluate_shift(eval_loader, model, args):
                 cur_agree = agreement(output0, output1).type(torch.FloatTensor).to(output0.device)
                 consist.update(cur_agree.item(), input.size(0))
 
-                # Chord Distance
-                #
-                # Measures prediction stability under spatial shifts by comparing
-                # the full softmax probability distributions of two shifted crops.
-                # Goes beyond top-1 agreement to capture changes in the entire
-                # confidence profile.
-                #
-                # Given two probability vectors p0 and p1 from softmax outputs:
-                #   1. L2-normalize both vectors onto the unit hypersphere:
-                #      p0' = p0 / ||p0||_2,  p1' = p1 / ||p1||_2
-                #
-                #   2. Compute the Euclidean distance between the normalized vectors:
-                #      d_chord(p0, p1) = ||p0' - p1'||_2 = sqrt(2 - 2*cos(theta))
-                #      where theta is the angle between p0' and p1'.
-                #
-                # Chord distance is a proper metric on the unit hypersphere,
-                # ranging from 0 (identical predictions) to sqrt(2) (maximally
-                # different predictions). Lower values indicate more consistent
-                # predictions under shift.
                 prob0 = torch.nn.Softmax(dim=1)(output0)
                 prob1 = torch.nn.Softmax(dim=1)(output1)
                 prob0_norm = torch.nn.functional.normalize(prob0, p=2, dim=1)
@@ -931,12 +919,32 @@ def evaluate_save(eval_loader, mean, std, args):
 
 
 # def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-def save_checkpoint(state, is_best, epoch, out_dir='./'):
+def save_checkpoint(state, is_best, epoch, out_dir='./', run_name='model'):
     torch.save(state, os.path.join(out_dir,'checkpoint.pth.tar'))
     if(epoch % 10 == 0):
         torch.save(state, os.path.join(out_dir,'checkpoint_%03d.pth.tar'%epoch))
-    if is_best:
-        shutil.copyfile(os.path.join(out_dir,'checkpoint.pth.tar'), os.path.join(out_dir,'model_best.pth.tar'))
+        if is_best:
+            best_path = os.path.join(out_dir, f"{run_name}_best.pth.tar")
+            shutil.copyfile(
+                os.path.join(out_dir, 'checkpoint.pth.tar'),
+                best_path
+            )
+
+
+def build_run_name(args):
+    parts = [args.arch, args.aa_type, f"seed{args.seed}"]
+
+    if args.aa_type in ['blur', 'soft', 'dab']:
+        parts.append(f"filter{args.filter_size}")
+
+    if args.aa_type == 'pasa':
+        parts.append(f"filter{args.filter_size}")
+        parts.append(f"group{args.pasa_group}")
+
+    if args.aa_type == 'dwt':
+        parts.append(args.wavelet_type)
+
+    return "_".join(parts)
 
 
 class AverageMeter(object):

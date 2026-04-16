@@ -70,7 +70,7 @@ class BasicBlock(nn.Module):
 
         self.bn1 = norm_layer(planes)
 
-        self.relu = AARelu() if aa_type == 'dab' else nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=True)
 
         # --- CONV2 is always stride 1 ---
         self.conv2 = conv3x3(planes, planes)
@@ -146,7 +146,7 @@ class Bottleneck(nn.Module):
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
 
-        self.relu = AARelu() if aa_type == 'dab' else nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=True)
 
         self.downsample = downsample
         self.stride = stride
@@ -249,7 +249,7 @@ class ResNet(nn.Module):
 
         self.bn1 = norm_layer(self.inplanes)
 
-        self.relu = AARelu() if aa_type == 'dab' else nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=True)
 
         # --- Layers ---
         self.layer1 = self._make_layer(block, 64, layers[0])

@@ -21,6 +21,7 @@ def get_aa_layer(
     from .blur import BlurPool
     from .dwt import DWT_2D_tiny
     from .pasa import Downsample_PASA_group_softmax
+    from .dab import DABPool
 
     if stride == 1:
         return nn.Identity()
@@ -35,6 +36,15 @@ def get_aa_layer(
         'blur': lambda: BlurPool(channels, filter_size=filter_size, stride=stride),
         'dwt': lambda: DWT_2D_tiny(wavelet_type),
         'pasa': lambda: Downsample_PASA_group_softmax(channels, filter_size, stride, group=pasa_group),
+        'dab': lambda: DABPool(
+            channels,
+            channels,
+            filter_size,
+            stride,
+            padding=filter_size // 2,
+            dab_controller=dab_controller,
+            depth_index=depth_index
+        ),
     }
 
     # .get() returns None if key doesn't exist, triggering the fallback
