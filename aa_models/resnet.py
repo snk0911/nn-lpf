@@ -188,8 +188,7 @@ class ResNet(nn.Module):
         filter_size: int = 1,
         aa_type: str = 'none',
         wavelet_type: str = 'haar',
-        pasa_group: int = 2,
-        pool_only: bool = True, 
+        pasa_group: int = 2
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -238,14 +237,8 @@ class ResNet(nn.Module):
         if is_identity:
             self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         else:
-            if pool_only:
-                aa_1 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
-                aa_2 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
-                self.pool = nn.Sequential(nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa_2)
-            else:
-                aa_1 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
-                aa_2 = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
-                self.pool = nn.Sequential(aa_1, nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa_2)
+            aa = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
+            self.pool = nn.Sequential(nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa)
 
         self.bn1 = norm_layer(self.inplanes)
 
@@ -285,10 +278,11 @@ class ResNet(nn.Module):
         if dilate:
             self.dilation *= stride
             stride = 1
-            
+
+        current_depth = self.dab_depth if self.aa_type == 'dab' else None       
+        
         if stride != 1 or self.inplanes != planes * block.expansion:
-            # Capture current depth before incrementing
-            current_depth = self.dab_depth if self.aa_type == 'dab' else None
+            
             
             aa_layer = get_aa_layer(self.inplanes, stride, self.aa_type, 
                                     self.wavelet_type, self.filter_size, self.pasa_group,
@@ -345,27 +339,21 @@ class ResNet(nn.Module):
 
 
 def resnet18(
-    *, 
-    progress: bool = True, 
-    filter_size: int = 1, 
-    pool_only: bool = True, 
+    *,
+    progress: bool = True,
+    filter_size: int = 1,
     aa_type: str = 'none',
-    wavelet_type: str ='haar',
-    pasa_group: int = 2, 
+    wavelet_type: str = 'haar',
+    pasa_group: int = 2,
     **kwargs: Any
 ) -> nn.Module:
-    """
-    Constructs a custom ResNet-18 model with Anti-Aliasing options.
-    Maintains V1.5 architecture for Baseline.
-    """
     model = ResNet(
-        BasicBlock, 
-        [2, 2, 2, 2], 
-        filter_size=filter_size, 
-        pool_only=pool_only, 
+        BasicBlock,
+        [2, 2, 2, 2],
+        filter_size=filter_size,
         aa_type=aa_type,
-        wavelet_type=wavelet_type,  
-        pasa_group=pasa_group, 
+        wavelet_type=wavelet_type,
+        pasa_group=pasa_group,
         **kwargs
     )
     return model

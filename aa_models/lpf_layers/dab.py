@@ -9,9 +9,8 @@ from torch import Tensor
 Note: AA-Relu is not implemented here, since only low-pass filters are used in the final experiments
 """
 class DABPool(nn.Module):
-    """Depth Adaptive Blur-Pool."""
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=2, padding=1,
-                 depth_index=0, dab_controller=None):
+    """Depth Adaptive Blur-Pool: blur with learnable sigma, then stride-subsample."""
+    def __init__(self, channels, stride=2, depth_index=0, dab_controller=None):
         super().__init__()
 
         if dab_controller is None:
@@ -19,26 +18,13 @@ class DABPool(nn.Module):
 
         self.controller = dab_controller
         self.depth_index = depth_index
-
-        self.blur = GaussianBlur2d(in_channels, kernel_size=3)
-
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride=stride,
-            padding=padding,
-            bias=False
-        )
-
-        self.bn = nn.BatchNorm2d(out_channels)
+        self.stride = stride
+        self.blur = GaussianBlur2d(channels, kernel_size=3)
 
     def forward(self, x):
         sigma = self.controller.get_sigma(self.depth_index)
         x = self.blur(x, sigma)
-        x = self.conv(x)
-        x = self.bn(x)
-        return x
+        return x[:, :, ::self.stride, ::self.stride]
     
 
 class DABSigmaController(nn.Module):
