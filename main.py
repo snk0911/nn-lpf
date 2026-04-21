@@ -4,10 +4,7 @@ import random
 import shutil
 import time
 import warnings
-import sys
 import numpy as np
-import os
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -23,6 +20,11 @@ import torchvision.datasets as datasets
 
 import aa_models
 import torchvision.models as models
+
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.numpy.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -353,8 +355,6 @@ def main_worker(gpu, ngpus_per_node, args):
         else:
             print("=> no checkpoint found at '{}'".format(args.resume))
 
-    cudnn.benchmark = True
-
     # Data loading code
     train_dir = os.path.join(args.data, 'train')
     val_dir = os.path.join(args.data, 'val')
@@ -382,9 +382,14 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         train_sampler = None
 
+    g = torch.Generator()
+    g.manual_seed(args.seed)
+
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler,
+        worker_init_fn=seed_worker,
+        generator=g)
 
     crop_size = 72 if(args.evaluate_shift or args.evaluate_diagonal or args.evaluate_save) else 64
     args.batch_size = 1 if (args.evaluate_diagonal or args.evaluate_save) else args.batch_size
@@ -719,7 +724,7 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=10, repetiti
  
     mean_ms = float(np.sum(timings) / repetitions)
  
-    print(' * Latency {mean:.3f} +/- {std:.3f} ms '
+    print(' * Latency {mean:.3f} ms '
           '(warmup={warmup}, repetitions={reps})'.format(
            mean=mean_ms, warmup=warmup, reps=repetitions))
  
