@@ -23,7 +23,7 @@ import torchvision.models as models
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
-    np.numpy.random.seed(worker_seed)
+    np.random.seed(worker_seed)
     random.seed(worker_seed)
 
 model_names = sorted(name for name in models.__dict__
