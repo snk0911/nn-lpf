@@ -669,13 +669,13 @@ def evaluate(eval_loader, model, criterion, args):
                 },
                 commit=False)
  
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
+        print(' * Acc@1 {top1.avg:.4f} Acc@5 {top5.avg:.4f}'
               .format(top1=top1, top5=top5))
  
     return top1.avg, losses.avg, None
 
 
-def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=10, repetitions=300):
+def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repetitions=300):
     """
     Measures inference latency of a model on a single image.
     Follows the approach described by Geifman (2020):
@@ -692,8 +692,7 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=10, repetiti
         repetitions: number of timed passes to average (default: 300)
  
     Returns:
-        mean_ms: mean latency in milliseconds
-        std_ms:  standard deviation of latency in milliseconds
+        median_ms: median latency in milliseconds
     """
     model.eval()
  
@@ -710,6 +709,7 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=10, repetiti
     with torch.no_grad():
         for _ in range(warmup):
             _ = model(dummy_input)
+        torch.cuda.synchronize()
  
     # Measure performance
     with torch.no_grad():
@@ -722,13 +722,13 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=10, repetiti
             curr_time = starter.elapsed_time(ender)  # milliseconds
             timings[rep] = curr_time
  
-    mean_ms = float(np.sum(timings) / repetitions)
+    median_ms = float(np.median(timings))
  
-    print(' * Latency {mean:.3f} ms '
+    print(' * Latency {median:.3f} ms '
           '(warmup={warmup}, repetitions={reps})'.format(
-           mean=mean_ms, warmup=warmup, reps=repetitions))
+           median=median_ms, warmup=warmup, reps=repetitions))
  
-    return mean_ms
+    return median_ms
 
 
 def evaluate_shift(eval_loader, model, args):
@@ -775,7 +775,7 @@ def evaluate_shift(eval_loader, model, args):
                            ep, args.epochs_shift, i, len(eval_loader),
                            batch_time=batch_time, consist=consist, chord=chord))
 
-        print(' * Consistency {consist.avg:.3f} Chord {chord.avg:.3f}'
+        print(' * Consistency {consist.avg:.4f} Chord {chord.avg:.4f}'
               .format(consist=consist, chord=chord))
 
     return consist.avg, chord.avg
@@ -839,7 +839,7 @@ def evaluate_diagonal(eval_loader, model, args):
                       'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                        i, len(eval_loader), batch_time=batch_time, prob=prob, top1=top1, top5=top5))
 
-    print(' * Prob {prob.avg:.3f} Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
+    print(' * Prob {prob.avg:.4f} Acc@1 {top1.avg:.4f} Acc@5 {top5.avg:.4f}'
           .format(prob=prob,top1=top1, top5=top5))
 
     np.save(os.path.join(args.out_dir,'diag_probs'),diag_probs)
@@ -862,7 +862,7 @@ def evaluate_c(eval_loader, model, criterion, args):
     print('\nComputing clean error...')
     acc1, _, _ = evaluate(eval_loader, model, criterion, args)
     clean_error = 1. - acc1.item() / 100.
-    print('Clean error: {:.2f}%'.format(100 * clean_error))
+    print('Clean error: {:.4f}%'.format(100 * clean_error))
 
     model.eval()
 
@@ -889,7 +889,7 @@ def evaluate_c(eval_loader, model, criterion, args):
 
                     if i % args.print_freq == 0:
                         print('Distortion: {:20s} | Severity: [{:d}] [{:d}/{:d}]\t'
-                              'Acc@1 {top1.val:.3f} ({top1.avg:.3f})'.format(
+                              'Acc@1 {top1.val:.4f} ({top1.avg:.4f})'.format(
                                distortion_name, severity, i, len(eval_loader), top1=top1))
 
             severity_errors.append(1. - top1.avg.item() / 100.)
@@ -897,13 +897,13 @@ def evaluate_c(eval_loader, model, criterion, args):
         raw_err = np.mean(severity_errors)
         error_rates.append(raw_err)
 
-        print('Distortion: {:20s} | Raw Error (%): {:.2f}'.format(
+        print('Distortion: {:20s} | Raw Error (%): {:.4f}'.format(
             distortion_name, 100 * raw_err))
 
     mce = 100 * np.mean(error_rates)
 
-    print('\n * Clean Error:  {:.2f}%'.format(100 * clean_error))
-    print(' * mCE:          {:.2f}%'.format(mce))
+    print('\n * Clean Error:  {:.4f}%'.format(100 * clean_error))
+    print(' * mCE:          {:.4f}%'.format(mce))
 
     if args.wandb:
         import wandb
