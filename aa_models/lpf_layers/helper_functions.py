@@ -37,13 +37,12 @@ def get_aa_layer(
         'dwt': lambda: DWT_2D_tiny(wavelet_type),
         'pasa': lambda: Downsample_PASA_group_softmax(channels, filter_size, stride, group=pasa_group),
         'dab': lambda: DABPool(
-            channels,
-            channels,
-            filter_size,
-            stride,
-            padding=filter_size // 2,
-            dab_controller=dab_controller,
-            depth_index=depth_index
+            channels, 
+            stride=stride, 
+            dab_controller=dab_controller, 
+            depth_index=depth_index,
+            filter_size=filter_size, 
+            padding=filter_size//2  # Standard 'same' padding logic
         ),
     }
 

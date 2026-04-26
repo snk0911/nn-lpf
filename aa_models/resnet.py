@@ -209,7 +209,7 @@ class ResNet(nn.Module):
         self.groups = groups
         self.base_width = width_per_group
 
-        self.dab_controller = DABSigmaController(num_downsample_layers=5) if aa_type == 'dab' else None
+        self.dab_controller = DABSigmaController(num_downsample_layers=4) if aa_type == 'dab' else None
         self.dab_depth = 0
 
         def get_aa_helper(c, s, d_idx=None):

@@ -107,7 +107,7 @@ parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
 
-parser.add_argument('--seed', default=1, type=int,
+parser.add_argument('--seed', default=42, type=int,
                     help='seed for initializing training. ')
 
 parser.add_argument('--gpu', default=0, type=int, help='GPU id to use.')
