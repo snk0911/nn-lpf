@@ -50,9 +50,8 @@ def generate_zone_plate(size=256):
     x = np.linspace(-r_max, r_max, size)
     y = np.linspace(-r_max, r_max, size)
     xx, yy = np.meshgrid(x, y)
-    r2 = xx**2 + yy**2
 
-    plate = 0.5 * (1 + np.cos(r2))  # Gonzalez & Woods (2018, p. 190)
+    plate = 0.5 * (1 + np.cos(xx**2 + yy**2))  # Gonzalez & Woods (2018, p. 190)
 
     plate_tensor = torch.from_numpy(plate).float()
     plate_tensor = plate_tensor.unsqueeze(0).repeat(64, 1, 1)  # (64, H, W)
