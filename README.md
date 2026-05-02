@@ -10,7 +10,7 @@ Standard CNN downsampling operations (strided convolutions, max-pooling) violate
 
 ## Reproducibility
  
-A fixed random seed (`--seed 1`) is used by default. Deterministic CUDA operations are enabled for full reproducibility, though this may reduce training speed.
+A fixed random seed (`--seed 42`) is used for all evaluations by default. For training seeds from one to five were used and per-seed results were aggregated. Deterministic CUDA operations are enabled for full reproducibility, though this may reduce training speed.
  
 ## Acknowledgments
  

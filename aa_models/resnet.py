@@ -64,8 +64,8 @@ class BasicBlock(nn.Module):
         else:
             # AA CASE: AA Layer handles stride, Conv is stride 1
             self.conv1 = nn.Sequential(
-                aa_layer,
                 conv3x3(inplanes, planes, stride=1)
+                aa_layer,  
             )
 
         self.bn1 = norm_layer(planes)
@@ -138,8 +138,8 @@ class Bottleneck(nn.Module):
         else:
             # Unified AA: AA Layer (stride) -> 3x3 Conv (stride 1)
             self.conv2 = nn.Sequential(
-                aa_layer,
-                conv3x3(width, width, stride=1, groups=groups, dilation=dilation)
+                conv3x3(width, width, stride=1, groups=groups, dilation=dilation),
+                aa_layer
             )
             
         self.bn2 = norm_layer(width)
@@ -289,12 +289,13 @@ class ResNet(nn.Module):
                                     dab_controller=self.dab_controller, depth_index=current_depth)
             is_identity = isinstance(aa_layer, nn.Identity)
 
+            # downsample shortcut 
             if is_identity:
                 conv = conv1x1(self.inplanes, planes * block.expansion, stride)
                 downsample = nn.Sequential(conv, norm_layer(planes * block.expansion))
             else:
                 conv = conv1x1(self.inplanes, planes * block.expansion, 1)
-                downsample = nn.Sequential(aa_layer, conv, norm_layer(planes * block.expansion))
+                downsample = nn.Sequential(conv, aa_layer, norm_layer(planes * block.expansion))
 
         if stride != 1 and self.aa_type == 'dab':
             self.dab_depth += 1
