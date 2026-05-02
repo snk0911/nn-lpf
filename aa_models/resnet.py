@@ -44,9 +44,8 @@ class BasicBlock(nn.Module):
             raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         
         # Retrieve the requested AA layer using the helper
-        # We pass 'inplanes' because the pooling happens on the input channels
         aa_layer = get_aa_layer(
-            channels=inplanes, 
+            channels=planes, 
             stride=stride, 
             aa_type=aa_type, 
             wavelet_type=wavelet_type, 
@@ -56,26 +55,19 @@ class BasicBlock(nn.Module):
             depth_index=depth_index
         )
 
-        # Check if the returned layer is Identity
-        # This happens if stride=1 OR if aa_type is 'none' (baseline)
-        if isinstance(aa_layer, nn.Identity):
-            # BASELINE CASE: Standard Conv with stride
-            self.conv1 = conv3x3(inplanes, planes, stride)
-        else:
-            # AA CASE: AA Layer handles stride, Conv is stride 1
-            self.conv1 = nn.Sequential(
-                conv3x3(inplanes, planes, stride=1)
-                aa_layer,  
-            )
-
+        self.conv1 = conv3x3(inplanes, planes)   # always stride 1, no AA here
         self.bn1 = norm_layer(planes)
-
         self.relu = nn.ReLU(inplace=True)
 
-        # --- CONV2 is always stride 1 ---
-        self.conv2 = conv3x3(planes, planes)
-
+        if isinstance(aa_layer, nn.Identity):
+            self.conv2 = conv3x3(planes, planes, stride)   # baseline: stride in conv2
+        else:
+            self.conv2 = nn.Sequential(
+                aa_layer,
+                conv3x3(planes, planes, stride=1)
+            )
         self.bn2 = norm_layer(planes)
+
         self.downsample = downsample
         self.stride = stride
 
@@ -138,8 +130,8 @@ class Bottleneck(nn.Module):
         else:
             # Unified AA: AA Layer (stride) -> 3x3 Conv (stride 1)
             self.conv2 = nn.Sequential(
-                conv3x3(width, width, stride=1, groups=groups, dilation=dilation),
-                aa_layer
+                aa_layer,
+                conv3x3(width, width, stride=1, groups=groups, dilation=dilation)
             )
             
         self.bn2 = norm_layer(width)
@@ -295,7 +287,7 @@ class ResNet(nn.Module):
                 downsample = nn.Sequential(conv, norm_layer(planes * block.expansion))
             else:
                 conv = conv1x1(self.inplanes, planes * block.expansion, 1)
-                downsample = nn.Sequential(conv, aa_layer, norm_layer(planes * block.expansion))
+                downsample = nn.Sequential(aa_layer, conv, norm_layer(planes * block.expansion))
 
         if stride != 1 and self.aa_type == 'dab':
             self.dab_depth += 1
