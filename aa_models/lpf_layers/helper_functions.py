@@ -20,6 +20,7 @@ def get_aa_layer(
 
     from .blur import BlurPool
     from .dwt import DWT_2D_tiny
+    from .asap import DWT_2D_tiny
     from .pasa import Downsample_PASA_group_softmax
     from .dab import DABPool
 
@@ -44,6 +45,7 @@ def get_aa_layer(
             filter_size=filter_size, 
             padding=filter_size//2  # Standard 'same' padding logic
         ),
+        'asap': lambda: ASAP(),
     }
 
     # .get() returns None if key doesn't exist, triggering the fallback

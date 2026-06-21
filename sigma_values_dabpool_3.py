@@ -3,11 +3,11 @@ import torch.nn.functional as F
 import numpy as np
 
 checkpoint_paths = [
-    'checkpoint_seed_1.pth',
-    'checkpoint_seed_2.pth',
-    'checkpoint_seed_3.pth',
-    'checkpoint_seed_4.pth',
-    'checkpoint_seed_5.pth',
+    'saved_checkpoints\\checkpoint_seed_1.pth',
+    'saved_checkpoints\\checkpoint_seed_2.pth',
+    'saved_checkpoints\\checkpoint_seed_3.pth',
+    'saved_checkpoints\\checkpoint_seed_4.pth',
+    'saved_checkpoints\\checkpoint_seed_5.pth',
 ]
 
 all_sigmas = []
