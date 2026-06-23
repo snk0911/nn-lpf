@@ -856,7 +856,19 @@ def evaluate_c(eval_loader, model, criterion, args):
         'contrast', 'elastic_transform', 'pixelate', 'jpeg_compression',
     ]
 
-    error_rates = []
+    # Binäre Frequenzgruppen. Ersetze diese Listen durch deine F_hf-Sortierung,
+    # sobald compute_fhf.py auf Tiny ImageNet-C gelaufen ist.
+    # Blurs zählen hier zu 'high' (Saikia et al.: Blur betrifft hohe Frequenzen).
+    freq_groups = {
+        'low':  ['frost', 'fog', 'brightness', 'contrast',
+                 'snow', 'elastic_transform'],
+        'high': ['gaussian_noise', 'shot_noise', 'impulse_noise',
+                 'defocus_blur', 'glass_blur', 'motion_blur', 'zoom_blur',
+                 'pixelate', 'jpeg_compression'],
+    }
+
+    # pro Corruption den raw error sammeln (Name -> Fehler)
+    errors = {}
 
     # First get clean error on val set
     print('\nComputing clean error...')
@@ -895,21 +907,32 @@ def evaluate_c(eval_loader, model, criterion, args):
             severity_errors.append(1. - top1.avg.item() / 100.)
 
         raw_err = np.mean(severity_errors)
-        error_rates.append(raw_err)
+        errors[distortion_name] = raw_err
 
         print('Distortion: {:20s} | Raw Error (%): {:.4f}'.format(
             distortion_name, 100 * raw_err))
 
-    mce = 100 * np.mean(error_rates)
+    # Gesamt-mCE (unverändert: Mittel über alle 15)
+    mce = 100 * np.mean(list(errors.values()))
+
+    # mCE pro Frequenzgruppe
+    group_mce = {}
+    for gname, corr_list in freq_groups.items():
+        vals = [errors[c] for c in corr_list if c in errors]
+        group_mce[gname] = 100 * np.mean(vals) if vals else float('nan')
 
     print('\n * Clean Error:  {:.4f}%'.format(100 * clean_error))
-    print(' * mCE:          {:.4f}%'.format(mce))
+    print(' * mCE (all):    {:.4f}%'.format(mce))
+    for gname in ['low', 'high']:
+        print(' * mCE ({:4s}):   {:.4f}%'.format(gname, group_mce[gname]))
 
     if args.wandb:
         import wandb
         wandb.log({
             'clean_error': 100 * clean_error,
             'mCE':         mce,
+            'mCE_low':     group_mce['low'],
+            'mCE_high':    group_mce['high'],
         })
 
     return mce, clean_error * 100
