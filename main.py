@@ -4,7 +4,11 @@ import random
 import shutil
 import time
 import warnings
+
 import numpy as np
+
+from scipy.spatial.distance import jensenshannon
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,11 +19,12 @@ import torch.optim
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
+
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+import torchvision.models as models
 
 import aa_models
-import torchvision.models as models
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
@@ -734,7 +739,7 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repetit
 def evaluate_shift(eval_loader, model, args):
     batch_time = AverageMeter()
     consist = AverageMeter()
-    chord = AverageMeter()
+    jsd = AverageMeter()
 
     model.eval()
 
@@ -756,12 +761,14 @@ def evaluate_shift(eval_loader, model, args):
                 cur_agree = agreement(output0, output1).type(torch.FloatTensor).to(output0.device)
                 consist.update(cur_agree.item(), input.size(0))
 
-                prob0 = torch.nn.Softmax(dim=1)(output0)
-                prob1 = torch.nn.Softmax(dim=1)(output1)
-                prob0_norm = torch.nn.functional.normalize(prob0, p=2, dim=1)
-                prob1_norm = torch.nn.functional.normalize(prob1, p=2, dim=1)
-                cur_chord = torch.norm(prob0_norm - prob1_norm, p=2, dim=1).mean().item()
-                chord.update(cur_chord, input.size(0))
+                # Jensen-Shannon distance (sqrt of the divergence, base 2 -> range [0, 1])
+                # computed with the reference implementation scipy.spatial.distance.jensenshannon.
+                # added to measure consistency with a proper metric
+                prob0 = torch.nn.Softmax(dim=1)(output0).cpu().numpy()
+                prob1 = torch.nn.Softmax(dim=1)(output1).cpu().numpy()
+                cur_jsd = np.mean([jensenshannon(prob0[k], prob1[k], base=2)
+                                   for k in range(prob0.shape[0])])
+                jsd.update(float(cur_jsd), input.size(0))
                 
                 batch_time.update(time.time() - end)
                 end = time.time()
@@ -771,14 +778,13 @@ def evaluate_shift(eval_loader, model, args):
                           'Test: [{2}/{3}]\t'
                           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                           'Consist {consist.val:.4f} ({consist.avg:.4f})\t'
-                          'Chord {chord.val:.4f} ({chord.avg:.4f})\t'.format(
+                          'JSD {jsd.val:.4f} ({jsd.avg:.4f})\t'.format(
                            ep, args.epochs_shift, i, len(eval_loader),
-                           batch_time=batch_time, consist=consist, chord=chord))
+                           batch_time=batch_time, consist=consist, jsd=jsd))
+        print(' * Consistency {consist.avg:.4f} JSD {jsd.avg:.4f}'
+              .format(consist=consist, jsd=jsd))
 
-        print(' * Consistency {consist.avg:.4f} Chord {chord.avg:.4f}'
-              .format(consist=consist, chord=chord))
-
-    return consist.avg, chord.avg
+    return consist.avg, jsd.avg
 
 
 def evaluate_diagonal(eval_loader, model, args):
