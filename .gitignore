@@ -2,5 +2,6 @@
 .python-version
 .vscode/
 weights/*.tar
+*.tar
 dataset/tiny-imagenet-200
 dataset/tiny-imagenet-c

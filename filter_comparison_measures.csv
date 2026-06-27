@@ -1,6 +1,6 @@
 Filter,Seed,Shift Consistency (Binary Agreement),Shift Consistency (Chord Distance),Top-1 Accuracy (%),Top-5 Accuracy (%),Latency (ms),mCE (%)
-None (Baseline),1,60.0220,0.5491,48.8100,72.2300,1.624,,
-None (Baseline),2,59.9140,0.5487,48.6900,72.6000,1.622,,
+None (Baseline),1,60.0220,0.5491,48.8100,72.2300,1.624,
+None (Baseline),2,59.9140,0.5487,48.6900,72.6000,1.622,
 None (Baseline),3,60.0600,0.5480,48.7600,72.4000,1.626,
 None (Baseline),4,59.2880,0.5566,48.0800,71.8100,1.626,
 None (Baseline),5,60.1340,0.5476,48.2200,72.7000,1.626,
