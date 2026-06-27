@@ -4,7 +4,11 @@ import random
 import shutil
 import time
 import warnings
+
 import numpy as np
+
+from scipy.spatial.distance import jensenshannon
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,11 +19,12 @@ import torch.optim
 import torch.multiprocessing as mp
 import torch.utils.data
 import torch.utils.data.distributed
+
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+import torchvision.models as models
 
 import aa_models
-import torchvision.models as models
 
 def seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
@@ -736,7 +741,7 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repetit
 def evaluate_shift(eval_loader, model, args):
     batch_time = AverageMeter()
     consist = AverageMeter()
-    chord = AverageMeter()
+    jsd = AverageMeter()
 
     model.eval()
 
@@ -758,12 +763,14 @@ def evaluate_shift(eval_loader, model, args):
                 cur_agree = agreement(output0, output1).type(torch.FloatTensor).to(output0.device)
                 consist.update(cur_agree.item(), input.size(0))
 
-                prob0 = torch.nn.Softmax(dim=1)(output0)
-                prob1 = torch.nn.Softmax(dim=1)(output1)
-                prob0_norm = torch.nn.functional.normalize(prob0, p=2, dim=1)
-                prob1_norm = torch.nn.functional.normalize(prob1, p=2, dim=1)
-                cur_chord = torch.norm(prob0_norm - prob1_norm, p=2, dim=1).mean().item()
-                chord.update(cur_chord, input.size(0))
+                # Jensen-Shannon distance (sqrt of the divergence, base 2 -> range [0, 1])
+                # computed with the reference implementation scipy.spatial.distance.jensenshannon.
+                # added to measure consistency with a proper metric
+                prob0 = torch.nn.Softmax(dim=1)(output0).cpu().numpy()
+                prob1 = torch.nn.Softmax(dim=1)(output1).cpu().numpy()
+                cur_jsd = np.mean([jensenshannon(prob0[k], prob1[k], base=2)
+                                   for k in range(prob0.shape[0])])
+                jsd.update(float(cur_jsd), input.size(0))
                 
                 batch_time.update(time.time() - end)
                 end = time.time()
@@ -773,14 +780,13 @@ def evaluate_shift(eval_loader, model, args):
                           'Test: [{2}/{3}]\t'
                           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                           'Consist {consist.val:.4f} ({consist.avg:.4f})\t'
-                          'Chord {chord.val:.4f} ({chord.avg:.4f})\t'.format(
+                          'JSD {jsd.val:.4f} ({jsd.avg:.4f})\t'.format(
                            ep, args.epochs_shift, i, len(eval_loader),
-                           batch_time=batch_time, consist=consist, chord=chord))
+                           batch_time=batch_time, consist=consist, jsd=jsd))
+        print(' * Consistency {consist.avg:.4f} JSD {jsd.avg:.4f}'
+              .format(consist=consist, jsd=jsd))
 
-        print(' * Consistency {consist.avg:.4f} Chord {chord.avg:.4f}'
-              .format(consist=consist, chord=chord))
-
-    return consist.avg, chord.avg
+    return consist.avg, jsd.avg
 
 
 def evaluate_diagonal(eval_loader, model, args):
@@ -858,7 +864,19 @@ def evaluate_c(eval_loader, model, criterion, args):
         'contrast', 'elastic_transform', 'pixelate', 'jpeg_compression',
     ]
 
-    error_rates = []
+    # Binäre Frequenzgruppen. Ersetze diese Listen durch deine F_hf-Sortierung,
+    # sobald compute_fhf.py auf Tiny ImageNet-C gelaufen ist.
+    # Blurs zählen hier zu 'high' (Saikia et al.: Blur betrifft hohe Frequenzen).
+    freq_groups = {
+        'low':  ['frost', 'fog', 'brightness', 'contrast',
+                 'snow', 'elastic_transform'],
+        'high': ['gaussian_noise', 'shot_noise', 'impulse_noise',
+                 'defocus_blur', 'glass_blur', 'motion_blur', 'zoom_blur',
+                 'pixelate', 'jpeg_compression'],
+    }
+
+    # pro Corruption den raw error sammeln (Name -> Fehler)
+    errors = {}
 
     # First get clean error on val set
     print('\nComputing clean error...')
@@ -897,21 +915,32 @@ def evaluate_c(eval_loader, model, criterion, args):
             severity_errors.append(1. - top1.avg.item() / 100.)
 
         raw_err = np.mean(severity_errors)
-        error_rates.append(raw_err)
+        errors[distortion_name] = raw_err
 
         print('Distortion: {:20s} | Raw Error (%): {:.4f}'.format(
             distortion_name, 100 * raw_err))
 
-    mce = 100 * np.mean(error_rates)
+    # Gesamt-mCE (unverändert: Mittel über alle 15)
+    mce = 100 * np.mean(list(errors.values()))
+
+    # mCE pro Frequenzgruppe
+    group_mce = {}
+    for gname, corr_list in freq_groups.items():
+        vals = [errors[c] for c in corr_list if c in errors]
+        group_mce[gname] = 100 * np.mean(vals) if vals else float('nan')
 
     print('\n * Clean Error:  {:.4f}%'.format(100 * clean_error))
-    print(' * mCE:          {:.4f}%'.format(mce))
+    print(' * mCE (all):    {:.4f}%'.format(mce))
+    for gname in ['low', 'high']:
+        print(' * mCE ({:4s}):   {:.4f}%'.format(gname, group_mce[gname]))
 
     if args.wandb:
         import wandb
         wandb.log({
             'clean_error': 100 * clean_error,
             'mCE':         mce,
+            'mCE_low':     group_mce['low'],
+            'mCE_high':    group_mce['high'],
         })
 
     return mce, clean_error * 100
