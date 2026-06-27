@@ -744,7 +744,6 @@ def evaluate_shift(eval_loader, model, args):
     jsd = AverageMeter()
 
     model.eval()
-
     with torch.no_grad():
         end = time.time()
         for ep in range(args.epochs_shift):
@@ -765,13 +764,17 @@ def evaluate_shift(eval_loader, model, args):
 
                 # Jensen-Shannon distance (sqrt of the divergence, base 2 -> range [0, 1])
                 # computed with the reference implementation scipy.spatial.distance.jensenshannon.
-                # added to measure consistency with a proper metric
-                prob0 = torch.nn.Softmax(dim=1)(output0).cpu().numpy()
-                prob1 = torch.nn.Softmax(dim=1)(output1).cpu().numpy()
-                cur_jsd = np.mean([jensenshannon(prob0[k], prob1[k], base=2)
-                                   for k in range(prob0.shape[0])])
+                # added to measure consistency with a proper metric.
+                # Note: for near-identical outputs (high consistency) the JS divergence is ~0;
+                # float64 keeps the precision needed to avoid sqrt of a slightly negative
+                # rounding value.
+                prob0 = torch.nn.Softmax(dim=1)(output0).cpu().numpy().astype(np.float64)
+                prob1 = torch.nn.Softmax(dim=1)(output1).cpu().numpy().astype(np.float64)
+                vals = np.array([jensenshannon(prob0[k], prob1[k], base=2)
+                                 for k in range(prob0.shape[0])])
+                cur_jsd = np.mean(vals)
                 jsd.update(float(cur_jsd), input.size(0))
-                
+
                 batch_time.update(time.time() - end)
                 end = time.time()
 
@@ -783,6 +786,7 @@ def evaluate_shift(eval_loader, model, args):
                           'JSD {jsd.val:.4f} ({jsd.avg:.4f})\t'.format(
                            ep, args.epochs_shift, i, len(eval_loader),
                            batch_time=batch_time, consist=consist, jsd=jsd))
+
         print(' * Consistency {consist.avg:.4f} JSD {jsd.avg:.4f}'
               .format(consist=consist, jsd=jsd))
 
