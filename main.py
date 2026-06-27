@@ -188,6 +188,8 @@ def main():
         print(f"wavelet_type: {args.wavelet_type}")
         print(f"DEBUG wavelet_type: {args.wavelet_type}, Type: {type(args.wavelet_type)}")
         subdir = f"{args.arch}_{args.aa_type}_{args.wavelet_type}"
+    elif args.aa_type == 'asap':
+        subdir = f"{args.arch}_{args.aa_type}"
     elif args.aa_type == 'none_debug':
         subdir = f"{args.arch}_baseline_debug"
     elif args.aa_type == 'none':

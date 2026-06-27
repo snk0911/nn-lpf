@@ -20,7 +20,7 @@ def get_aa_layer(
 
     from .blur import BlurPool
     from .dwt import DWT_2D_tiny
-    from .asap import DWT_2D_tiny
+    from .asap import ASAP
     from .pasa import Downsample_PASA_group_softmax
     from .dab import DABPool
 
