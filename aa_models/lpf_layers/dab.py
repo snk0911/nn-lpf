@@ -26,8 +26,7 @@ class DABPool(nn.Module):
 
     def forward(self, x):
         sigma = self.controller.get_sigma(self.depth_index)
-        x = self.blur(x, sigma)
-        return x[:, :, ::self.stride, ::self.stride]
+        return self.blur(x, sigma, stride=self.stride)
     
 
 class DABSigmaController(nn.Module):
@@ -52,36 +51,57 @@ class DABSigmaController(nn.Module):
 
 
 class GaussianBlur2d(nn.Module):
-    """Applies a 2D Gaussian Blur with dynamic sigma and selectable kernel size."""
+    """Depthwise Gaussian blur with dynamically learned sigma."""
+
     def __init__(self, channels, kernel_size=3, padding=0):
         super().__init__()
+
         self.kernel_size = kernel_size
         self.channels = channels
         self.padding = padding
-        
-        # Create grid coordinates.
-        ax = torch.arange(0, kernel_size, dtype=torch.float32) - (kernel_size - 1) // 2
-        xx, yy = torch.meshgrid(ax, ax, indexing='ij')
-        
-        # Stack and register buffer (shape: 2 x k x k)
-        self.register_buffer('grid', torch.stack([xx, yy], dim=0))
 
-    def forward(self, x, sigma):
-        # grid shape: (2, k, k)
-        
-        # Calculate squared distances from center
-        d_sq = self.grid[0]**2 + self.grid[1]**2
-        
-        # Gaussian formula
-        # FIX: Using clamp(min=1e-4) as a minimal, non-intrusive safety net 
-        # against division-by-zero and gradient explosion if sigma collapses.
-        kernel = torch.exp(-d_sq / (2 * sigma.clamp(min=1e-4)**2))
-        
-        # Normalize the kernel so it sums to 1
+        ax = (
+            torch.arange(kernel_size, dtype=torch.float32)
+            - (kernel_size - 1) // 2
+        )
+
+        xx, yy = torch.meshgrid(
+            ax,
+            ax,
+            indexing='ij'
+        )
+
+        # Squared distance from the kernel center.
+        self.register_buffer(
+            'd_sq',
+            xx.square() + yy.square()
+        )
+
+    def forward(self, x, sigma, stride=1):
+        # sigma is guaranteed to be > 0 by
+        # softplus + cumulative sum in DABSigmaController.
+        kernel = torch.exp(
+            -self.d_sq / (2.0 * sigma.square())
+        )
+
         kernel = kernel / kernel.sum()
-        
-        # Reshape for conv2d: (out_channels, in_channels/groups, kH, kW)
-        # Since groups=channels, we repeat the kernel for each channel.
-        kernel = kernel.view(1, 1, self.kernel_size, self.kernel_size).repeat(self.channels, 1, 1, 1)
-        
-        return F.conv2d(x, weight=kernel, groups=self.channels, padding=self.padding)
+
+        kernel = kernel.view(
+            1,
+            1,
+            self.kernel_size,
+            self.kernel_size
+        ).expand(
+            self.channels,
+            1,
+            self.kernel_size,
+            self.kernel_size
+        )
+
+        return F.conv2d(
+            x,
+            weight=kernel,
+            stride=stride,
+            padding=self.padding,
+            groups=self.channels
+        )

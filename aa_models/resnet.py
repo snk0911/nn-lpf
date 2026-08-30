@@ -60,12 +60,37 @@ class BasicBlock(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
         if isinstance(aa_layer, nn.Identity):
-            self.conv2 = conv3x3(planes, planes, stride)   # baseline: stride in conv2
+            # Baseline: stride remains in conv2
+            self.conv2 = conv3x3(
+                planes,
+                planes,
+                stride=stride
+            )
+
+        elif aa_type in ('dab', 'dwt'):
+            # DAB / WaveCNet:
+            # strided Conv -> dense Conv followed by AA/downsampling
+            self.conv2 = nn.Sequential(
+                conv3x3(
+                    planes,
+                    planes,
+                    stride=1
+                ),
+                aa_layer
+            )
+
         else:
+            # BlurPool / PASA / ASAP / avg:
+            # preserve the existing integration
             self.conv2 = nn.Sequential(
                 aa_layer,
-                conv3x3(planes, planes, stride=1)
+                conv3x3(
+                    planes,
+                    planes,
+                    stride=1
+                )
             )
+
         self.bn2 = norm_layer(planes)
 
         self.downsample = downsample
@@ -125,13 +150,36 @@ class Bottleneck(nn.Module):
         is_identity = isinstance(aa_layer, nn.Identity)
 
         if is_identity:
-            # Baseline: Stride inside the 3x3 Conv
-            self.conv2 = conv3x3(width, width, stride, groups, dilation)
+            self.conv2 = conv3x3(
+                width,
+                width,
+                stride,
+                groups,
+                dilation
+            )
+
+        elif aa_type in ('dab', 'dwt'):
+            self.conv2 = nn.Sequential(
+                conv3x3(
+                    width,
+                    width,
+                    stride=1,
+                    groups=groups,
+                    dilation=dilation
+                ),
+                aa_layer
+            )
+
         else:
-            # Unified AA: AA Layer (stride) -> 3x3 Conv (stride 1)
             self.conv2 = nn.Sequential(
                 aa_layer,
-                conv3x3(width, width, stride=1, groups=groups, dilation=dilation)
+                conv3x3(
+                    width,
+                    width,
+                    stride=1,
+                    groups=groups,
+                    dilation=dilation
+                )
             )
             
         self.bn2 = norm_layer(width)
@@ -209,32 +257,85 @@ class ResNet(nn.Module):
                                 dab_controller=self.dab_controller, depth_index=d_idx)
         
         # --- Head Configuration ---
-        aa_head_check = get_aa_helper(self.inplanes, 2)
-        is_identity = isinstance(aa_head_check, nn.Identity)
-
-        # borrowed from CIFAR RESNET implementation even tho maxpool was removed from there while we keep it here
-        # @inproceedings{he2016identity,
-        #     title={Identity mappings in deep residual networks},
-        #     author={He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
-        #     booktitle={European conference on computer vision},
-        #     pages={630--645},
-        #     year={2016},
-        #     organization={Springer}
-        #     }
-        # 1.5 default
-        # self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
-        # CIFAR-Style/Tiny-ImageNet
-        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=3, stride=1, padding=1, bias=False)
-
-        if is_identity:
-            self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        else:
-            aa = get_aa_helper(self.inplanes, 2, self.dab_depth); self.dab_depth += 1
-            self.pool = nn.Sequential(nn.MaxPool2d(kernel_size=3, stride=1, padding=1), aa)
+        # CIFAR-Style / Tiny-ImageNet stem:
+        # Keep the initial convolution dense. Spatial downsampling starts in self.pool.
+        self.conv1 = nn.Conv2d(
+            3,
+            self.inplanes,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False
+        )
 
         self.bn1 = norm_layer(self.inplanes)
-
         self.relu = nn.ReLU(inplace=True)
+
+        # ---------------------------------------------------------
+        # First downsampling operation
+        # ---------------------------------------------------------
+
+        if self.aa_type == 'none':
+            # Vanilla baseline:
+            # MaxPool(k=3, s=2)
+            self.pool = nn.MaxPool2d(
+                kernel_size=3,
+                stride=2,
+                padding=1
+            )
+
+        elif self.aa_type in ('dwt', 'asap'):
+            # WaveCNet, Eq. (14):
+            #
+            # MaxPool_s=2 -> DWT_LL
+            #
+            # IMPORTANT:
+            # Do NOT keep a stride-1 MaxPool in front of DWT.
+            # DWT_2D_tiny already performs filtering + 2x downsampling.
+            self.pool = get_aa_helper(
+                self.inplanes,
+                2
+            )
+
+        else:
+            # BlurPool / PASA / DAB / avg:
+            #
+            # Preserve the existing integration:
+            # DenseMax(s=1) -> AA/downsampling layer
+            #
+            # DAB additionally requires the current depth index.
+            depth_index = (
+                self.dab_depth
+                if self.aa_type == 'dab'
+                else None
+            )
+
+            aa = get_aa_helper(
+                self.inplanes,
+                2,
+                depth_index
+            )
+
+            # Preserve the old fallback behavior for unknown aa_type values.
+            if isinstance(aa, nn.Identity):
+                self.pool = nn.MaxPool2d(
+                    kernel_size=3,
+                    stride=2,
+                    padding=1
+                )
+            else:
+                self.pool = nn.Sequential(
+                    nn.MaxPool2d(
+                        kernel_size=3,
+                        stride=1,
+                        padding=1
+                    ),
+                    aa
+                )
+
+                # Only DAB uses the depth counter.
+                if self.aa_type == 'dab':
+                    self.dab_depth += 1
 
         # --- Layers ---
         self.layer1 = self._make_layer(block, 64, layers[0])
@@ -263,50 +364,142 @@ class ResNet(nn.Module):
                 elif isinstance(m, BasicBlock) and m.bn2.weight is not None:
                     nn.init.constant_(m.bn2.weight, 0)
 
+
     def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation
+
         if dilate:
             self.dilation *= stride
             stride = 1
 
-        current_depth = self.dab_depth if self.aa_type == 'dab' else None       
-        
+        current_depth = (
+            self.dab_depth
+            if self.aa_type == 'dab'
+            else None
+        )
+
+        # A projection shortcut is only needed when:
+        # 1. spatial resolution changes, or
+        # 2. channel count changes.
         if stride != 1 or self.inplanes != planes * block.expansion:
-            
-            
-            aa_layer = get_aa_layer(self.inplanes, stride, self.aa_type, 
-                                    self.wavelet_type, self.filter_size, self.pasa_group,
-                                    dab_controller=self.dab_controller, depth_index=current_depth)
-            is_identity = isinstance(aa_layer, nn.Identity)
 
-            # downsample shortcut 
-            if is_identity:
-                conv = conv1x1(self.inplanes, planes * block.expansion, stride)
-                downsample = nn.Sequential(conv, norm_layer(planes * block.expansion))
+            out_channels = planes * block.expansion
+
+            if self.aa_type == 'none':
+                # Baseline shortcut:
+                # Conv1x1 with the original stride.
+                downsample = nn.Sequential(
+                    conv1x1(
+                        self.inplanes,
+                        out_channels,
+                        stride
+                    ),
+                    norm_layer(out_channels)
+                )
+
+            elif self.aa_type in ('dab', 'dwt'):
+                # DAB / WaveCNet:
+                #
+                # Conv1x1(s=2)
+                # becomes
+                # Conv1x1(s=1) -> AA/downsampling
+                #
+                # Since AA runs AFTER the projection, it operates
+                # on out_channels.
+                shortcut_aa = get_aa_layer(
+                    out_channels,
+                    stride,
+                    self.aa_type,
+                    self.wavelet_type,
+                    self.filter_size,
+                    self.pasa_group,
+                    dab_controller=self.dab_controller,
+                    depth_index=current_depth
+                )
+
+                downsample = nn.Sequential(
+                    conv1x1(
+                        self.inplanes,
+                        out_channels,
+                        stride=1
+                    ),
+                    shortcut_aa,
+                    norm_layer(out_channels)
+                )
+
             else:
-                conv = conv1x1(self.inplanes, planes * block.expansion, 1)
-                downsample = nn.Sequential(aa_layer, conv, norm_layer(planes * block.expansion))
+                # BlurPool / PASA / ASAP / avg:
+                # Preserve the existing AA-before-projection integration.
+                shortcut_aa = get_aa_layer(
+                    self.inplanes,
+                    stride,
+                    self.aa_type,
+                    self.wavelet_type,
+                    self.filter_size,
+                    self.pasa_group,
+                    dab_controller=self.dab_controller,
+                    depth_index=current_depth
+                )
 
+                downsample = nn.Sequential(
+                    shortcut_aa,
+                    conv1x1(
+                        self.inplanes,
+                        out_channels,
+                        stride=1
+                    ),
+                    norm_layer(out_channels)
+                )
+
+        # One new DAB depth level per actual spatial downsampling stage.
+        # Main branch and shortcut both use current_depth above;
+        # only afterwards do we advance to the next level.
         if stride != 1 and self.aa_type == 'dab':
             self.dab_depth += 1
-            
+
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample, self.groups, 
-                            self.base_width, previous_dilation, norm_layer,
-                            self.filter_size, self.aa_type, self.wavelet_type, self.pasa_group,
-                            dab_controller=self.dab_controller, depth_index=current_depth if stride!=1 else None))
-        
+
+        layers.append(
+            block(
+                self.inplanes,
+                planes,
+                stride,
+                downsample,
+                self.groups,
+                self.base_width,
+                previous_dilation,
+                norm_layer,
+                self.filter_size,
+                self.aa_type,
+                self.wavelet_type,
+                self.pasa_group,
+                dab_controller=self.dab_controller,
+                depth_index=current_depth if stride != 1 else None
+            )
+        )
+
         self.inplanes = planes * block.expansion
-        
+
         for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes, groups=self.groups, 
-                                base_width=self.base_width, dilation=self.dilation, 
-                                norm_layer=norm_layer, filter_size=self.filter_size,
-                                aa_type=self.aa_type, wavelet_type=self.wavelet_type, 
-                                pasa_group=self.pasa_group,
-                                dab_controller=self.dab_controller, depth_index=None))
+            layers.append(
+                block(
+                    self.inplanes,
+                    planes,
+                    groups=self.groups,
+                    base_width=self.base_width,
+                    dilation=self.dilation,
+                    norm_layer=norm_layer,
+                    filter_size=self.filter_size,
+                    aa_type=self.aa_type,
+                    wavelet_type=self.wavelet_type,
+                    pasa_group=self.pasa_group,
+                    dab_controller=self.dab_controller,
+                    depth_index=None
+                )
+            )
+
         return nn.Sequential(*layers)
 
     def _forward_impl(self, x: Tensor) -> Tensor:
