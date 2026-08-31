@@ -225,7 +225,7 @@ class ResNet(nn.Module):
         width_per_group: int = 64,
         replace_stride_with_dilation: Optional[list[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
-        filter_size: int = 1,
+        filter_size: int = 3,
         aa_type: str = 'none',
         wavelet_type: str = 'haar',
         pasa_group: int = 2
@@ -527,7 +527,7 @@ class ResNet(nn.Module):
 def resnet18(
     *,
     progress: bool = True,
-    filter_size: int = 1,
+    filter_size: int = 3,
     aa_type: str = 'none',
     wavelet_type: str = 'haar',
     pasa_group: int = 2,
