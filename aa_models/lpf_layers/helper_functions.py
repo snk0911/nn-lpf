@@ -4,9 +4,8 @@ import torch.nn.functional as F
 from typing import Dict, Callable
 
 
-# ---------------------------------------------------------
-# helper functions
-# ---------------------------------------------------------
+# --- helper functions ---
+
 def get_aa_layer(
     channels: int,
     stride: int,
