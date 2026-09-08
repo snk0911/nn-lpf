@@ -4,6 +4,7 @@ import random
 import shutil
 import time
 import warnings
+import copy
 
 import numpy as np
 
@@ -135,10 +136,15 @@ parser.add_argument('--output', dest='out_dir', default='./out', type=str,
 
 parser.add_argument('-es', '--evaluate_shift', dest='evaluate_shift', action='store_true',
                     help='evaluate model on shift-invariance')
+
 parser.add_argument('-ed', '--evaluate_diagonal', dest='evaluate_diagonal', action='store_true',
                     help='evaluate model on diagonal')
+
 parser.add_argument('--evaluate_c', action='store_true',
                     help='Evaluate mCE on Tiny ImageNet-C')
+
+parser.add_argument('--evaluate_efficiency', action='store_true',
+                    help='measure params, MACs and latency')
 
 parser.add_argument('--epochs-shift', default=5, type=int, metavar='N',
                     help='number of total epochs to run for shift-invariance test')
@@ -176,29 +182,14 @@ def main():
     print(f"lr_warmup_method: {args.lr_warmup_method}")
     print(f"lr_warmup_epochs: {args.lr_warmup_epochs}")  
     print(f"aa_type: {args.aa_type}")
-    if args.aa_type == 'blur':
+    
+    if args.aa_type in ('blur', 'soft', 'dab'):
         print(f"filter_size: {args.filter_size}")
-        subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
-    elif args.aa_type == 'soft':
-        print(f"filter_size: {args.filter_size}")
-        subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
-    elif args.aa_type == 'dab':
-        print(f"filter_size: {args.filter_size}")
-        subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}"
     elif args.aa_type == 'pasa':
         print(f"filter_size: {args.filter_size}")
         print(f"pasa_group: {args.pasa_group}")
-        subdir = f"{args.arch}_{args.aa_type}_filter{args.filter_size}_group{args.pasa_group}"
     elif args.aa_type == 'dwt':
         print(f"wavelet_type: {args.wavelet_type}")
-        print(f"DEBUG wavelet_type: {args.wavelet_type}, Type: {type(args.wavelet_type)}")
-        subdir = f"{args.arch}_{args.aa_type}_{args.wavelet_type}"
-    elif args.aa_type == 'asap':
-        subdir = f"{args.arch}_{args.aa_type}"
-    elif args.aa_type == 'none_debug':
-        subdir = f"{args.arch}_baseline_debug"
-    elif args.aa_type == 'none':
-        subdir = f"{args.arch}_baseline"
     
     args.run_name = build_run_name(args)
 
@@ -451,9 +442,12 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if args.evaluate:
         evaluate(eval_loader, model, criterion, args)
-        eval_latency(model, gpu=args.gpu)  # separate, clean measurement
         return
-
+        
+    if args.evaluate_efficiency:
+        eval_efficiency(model, gpu=args.gpu)
+        return
+        
     if(args.evaluate_shift):
         evaluate_shift(eval_loader, model, args)
         return
@@ -682,7 +676,34 @@ def evaluate(eval_loader, model, criterion, args):
     return top1.avg, losses.avg, None
 
 
-def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repetitions=300):
+def eval_efficiency(model, gpu=None, input_size=(1, 3, 64, 64),
+                    warmup=100, repetitions=300):
+    """Params, MACs and latency in one call."""
+    model.eval()
+
+    n_params = sum(p.numel() for p in model.parameters())
+
+    from torch.utils.flop_counter import FlopCounterMode
+
+    dummy = torch.randn(input_size)
+    if gpu is not None:
+        dummy = dummy.cuda(gpu)
+
+    counter = FlopCounterMode(display=False)
+    with counter, torch.no_grad():
+        model(dummy)
+    macs = counter.get_total_flops() // 2
+
+    median_ms = measure_latency(model, gpu=gpu, input_size=input_size,
+                                warmup=warmup, repetitions=repetitions)
+
+    print(' * Params {p:.2f} M | MACs {m:.3f} G | Latency {l:.3f} ms'.format(
+        p=n_params / 1e6, m=macs / 1e9, l=median_ms))
+
+    return {'params': n_params, 'macs': macs, 'latency_ms': median_ms}
+
+
+def measure_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repetitions=300):
     """
     Measures inference latency of a model on a single image.
     Follows the approach described by Geifman (2020):
@@ -695,7 +716,7 @@ def eval_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repetit
         model:       trained model — must already be on the correct device
         gpu:         GPU id to use (None for CPU)
         input_size:  input tensor shape (default: 1 x 3 x 64 x 64 for Tiny ImageNet)
-        warmup:      number of warmup passes before measurement (default: 10)
+        warmup:      number of warmup passes before measurement (default: 100)
         repetitions: number of timed passes to average (default: 300)
  
     Returns:
