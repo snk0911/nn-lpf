@@ -1,16 +1,39 @@
 import torch
 import torch.nn as nn
-from typing import Any, Callable, Optional, Union, Dict
+from typing import Any, Callable, Optional
 from torch import Tensor
-import torch.utils.model_zoo as model_zoo
+
 from .lpf_layers import *
 
 
-__all__ = ['ResNet', 'resnet18']
+__all__ = ["ResNet", "resnet18"]
 
 
-def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
-    """3x3 convolution with padding"""
+_VALID_AA_TYPES = {"none", "blur", "dwt", "pasa", "dab", "asap"}
+
+# BlurPool and PASA follow the Zhang-style residual-block integration:
+# dense conv -> BN -> ReLU -> AA/downsample -> next dense conv.
+_POST_ACTIVATION_AA = {"blur", "pasa"}
+
+# WaveCNet Eq. (15) and DABPool Eq. (4) both replace a strided convolution
+# by a dense convolution followed immediately by their downsampling operator.
+# In this ResNet mapping that operator is therefore placed before BN/ReLU.
+_POST_CONV_AA = {"dwt", "dab"}
+
+# ASAP's official resnet_asap.py wraps every stride>1 convolution as
+# ASAP_padding_one() -> dense convolution. This is the ASAPsp (small-padding)
+# topology used here at the three shared stage-transition downsampling sites.
+_PRE_CONV_AA = {"asap"}
+
+
+def conv3x3(
+    in_planes: int,
+    out_planes: int,
+    stride: int = 1,
+    groups: int = 1,
+    dilation: int = 1,
+) -> nn.Conv2d:
+    """3x3 convolution with padding."""
     return nn.Conv2d(
         in_planes,
         out_planes,
@@ -24,99 +47,53 @@ def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, d
 
 
 def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
-    """1x1 convolution"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+    """1x1 convolution."""
+    return nn.Conv2d(
+        in_planes,
+        out_planes,
+        kernel_size=1,
+        stride=stride,
+        bias=False,
+    )
+
+
+def _build_aa_layer(
+    channels: int,
+    stride: int,
+    aa_type: str,
+    wavelet_type: str,
+    filter_size: int,
+    pasa_group: int,
+    dab_controller=None,
+    depth_index: Optional[int] = None,
+) -> nn.Module:
+    """Create one method-specific anti-aliased downsampling layer."""
+    layer = get_aa_layer(
+        channels=channels,
+        stride=stride,
+        aa_type=aa_type,
+        wavelet_type=wavelet_type,
+        filter_size=filter_size,
+        pasa_group=pasa_group,
+        dab_controller=dab_controller,
+        depth_index=depth_index,
+    )
+
+    return layer
 
 
 class BasicBlock(nn.Module):
+    """ResNet-18/34 BasicBlock with method-specific downsampling integration.
+
+    The unfiltered baseline is the usual small-image/CIFAR-style BasicBlock:
+        conv1 3x3, stride={1,2} -> BN -> ReLU -> conv2 3x3, stride=1 -> BN
+
+    At stage transitions, the stride-2 operation is replaced according to the
+    selected anti-aliasing method rather than forcing every method into one
+    generic position.
+    """
+
     expansion: int = 1
-
-    def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1, 
-                 base_width=64, dilation=1, norm_layer=None, filter_size=1, 
-                 aa_type='none', wavelet_type='haar', pasa_group=2,
-                 dab_controller=None, depth_index=None):
-        super(BasicBlock, self).__init__()
-        if norm_layer is None:
-            norm_layer = nn.BatchNorm2d
-        if groups != 1 or base_width != 64:
-            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
-        if dilation > 1:
-            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
-        
-        # Retrieve the requested AA layer using the helper
-        aa_layer = get_aa_layer(
-            channels=planes, 
-            stride=stride, 
-            aa_type=aa_type, 
-            wavelet_type=wavelet_type, 
-            filter_size=filter_size, 
-            pasa_group=pasa_group,
-            dab_controller=dab_controller,
-            depth_index=depth_index
-        )
-
-        self.conv1 = conv3x3(inplanes, planes)   # always stride 1, no AA here
-        self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
-
-        if isinstance(aa_layer, nn.Identity):
-            # Baseline: stride remains in conv2
-            self.conv2 = conv3x3(
-                planes,
-                planes,
-                stride=stride
-            )
-
-        elif aa_type in ('dab', 'dwt'):
-            # DAB / WaveCNet:
-            # strided Conv -> dense Conv followed by AA/downsampling
-            self.conv2 = nn.Sequential(
-                conv3x3(
-                    planes,
-                    planes,
-                    stride=1
-                ),
-                aa_layer
-            )
-
-        else:
-            # BlurPool / PASA / ASAP / avg:
-            # preserve the existing integration
-            self.conv2 = nn.Sequential(
-                aa_layer,
-                conv3x3(
-                    planes,
-                    planes,
-                    stride=1
-                )
-            )
-
-        self.bn2 = norm_layer(planes)
-
-        self.downsample = downsample
-        self.stride = stride
-
-    def forward(self, x: Tensor) -> Tensor:
-        identity = x
-
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        if self.downsample is not None:
-            identity = self.downsample(x)
-
-        out += identity
-        out = self.relu(out)
-
-        return out
-
-
-class Bottleneck(nn.Module):
-    expansion: int = 4
 
     def __init__(
         self,
@@ -128,96 +105,121 @@ class Bottleneck(nn.Module):
         base_width: int = 64,
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
-        filter_size: int = 1,
-        aa_type: str = 'none',
-        wavelet_type: str = 'haar',
+        filter_size: int = 3,
+        aa_type: str = "none",
+        wavelet_type: str = "haar",
         pasa_group: int = 2,
-        dab_controller=None, depth_index=None
+        dab_controller=None,
+        depth_index: Optional[int] = None,
     ) -> None:
         super().__init__()
+
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
-        width = int(planes * (base_width / 64.0)) * groups
-        
-        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv1x1(inplanes, width)
-        self.bn1 = norm_layer(width)
-        
-        # --- AA Logic on CONV2 ---
-        # In ResNet V1.5 (Bottleneck), stride is in conv2.
-        aa_layer = get_aa_layer(width, stride, aa_type, wavelet_type, filter_size, pasa_group,
-                        dab_controller=dab_controller, depth_index=depth_index)
-        is_identity = isinstance(aa_layer, nn.Identity)
-
-        if is_identity:
-            self.conv2 = conv3x3(
-                width,
-                width,
-                stride,
-                groups,
-                dilation
-            )
-
-        elif aa_type in ('dab', 'dwt'):
-            self.conv2 = nn.Sequential(
-                conv3x3(
-                    width,
-                    width,
-                    stride=1,
-                    groups=groups,
-                    dilation=dilation
-                ),
-                aa_layer
-            )
-
-        else:
-            self.conv2 = nn.Sequential(
-                aa_layer,
-                conv3x3(
-                    width,
-                    width,
-                    stride=1,
-                    groups=groups,
-                    dilation=dilation
-                )
-            )
-            
-        self.bn2 = norm_layer(width)
-        self.conv3 = conv1x1(width, planes * self.expansion)
-        self.bn3 = norm_layer(planes * self.expansion)
-
-        self.relu = nn.ReLU(inplace=True)
+        if groups != 1 or base_width != 64:
+            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        if aa_type not in _VALID_AA_TYPES:
+            raise ValueError(f"Unsupported aa_type: {aa_type}")
 
         self.downsample = downsample
         self.stride = stride
+        self.relu = nn.ReLU(inplace=True)
+
+        # Identity placeholders keep the forward path explicit and make the
+        # method-specific order easy to inspect.
+        self.aa_before_conv1 = nn.Identity()
+        self.aa_after_conv1 = nn.Identity()
+        self.aa_after_relu1 = nn.Identity()
+
+        if stride == 1 or aa_type == "none":
+            # Standard CIFAR/small-image ResNet-18 BasicBlock.
+            self.conv1 = conv3x3(inplanes, planes, stride=stride)
+
+        elif aa_type in _POST_ACTIVATION_AA:
+            # BlurPool / PASA:
+            # Conv3x3(s1) -> BN -> ReLU -> AA(s2) -> Conv3x3(s1)
+            self.conv1 = conv3x3(inplanes, planes, stride=1)
+            self.aa_after_relu1 = _build_aa_layer(
+                channels=planes,
+                stride=stride,
+                aa_type=aa_type,
+                wavelet_type=wavelet_type,
+                filter_size=filter_size,
+                pasa_group=pasa_group,
+                dab_controller=dab_controller,
+                depth_index=depth_index,
+            )
+
+        elif aa_type in _POST_CONV_AA:
+            # WaveCNet / DABPool:
+            # Conv3x3(s1) -> AA(s2) -> BN -> ReLU -> Conv3x3(s1)
+            self.conv1 = conv3x3(inplanes, planes, stride=1)
+            self.aa_after_conv1 = _build_aa_layer(
+                channels=planes,
+                stride=stride,
+                aa_type=aa_type,
+                wavelet_type=wavelet_type,
+                filter_size=filter_size,
+                pasa_group=pasa_group,
+                dab_controller=dab_controller,
+                depth_index=depth_index,
+            )
+
+        elif aa_type in _PRE_CONV_AA:
+            # ASAP reference topology:
+            # ASAP(s2) -> Conv3x3(s1) -> BN -> ReLU -> Conv3x3(s1)
+            self.aa_before_conv1 = _build_aa_layer(
+                channels=inplanes,
+                stride=stride,
+                aa_type=aa_type,
+                wavelet_type=wavelet_type,
+                filter_size=filter_size,
+                pasa_group=pasa_group,
+                dab_controller=dab_controller,
+                depth_index=depth_index,
+            )
+            self.conv1 = conv3x3(inplanes, planes, stride=1)
+
+        else:  # defensive; all valid methods are handled above
+            raise ValueError(f"Unsupported aa_type: {aa_type}")
+
+        self.bn1 = norm_layer(planes)
+        self.conv2 = conv3x3(planes, planes, stride=1)
+        self.bn2 = norm_layer(planes)
 
     def forward(self, x: Tensor) -> Tensor:
         identity = x
 
-        out = self.conv1(x)
+        out = self.aa_before_conv1(x)
+        out = self.conv1(out)
+        out = self.aa_after_conv1(out)
         out = self.bn1(out)
         out = self.relu(out)
+        out = self.aa_after_relu1(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
-        out = self.relu(out)
-
-        out = self.conv3(out)
-        out = self.bn3(out)
 
         if self.downsample is not None:
             identity = self.downsample(x)
 
         out += identity
         out = self.relu(out)
-
         return out
 
 
 class ResNet(nn.Module):
+    """Tiny-ImageNet ResNet-18 using the standard CIFAR/small-image adaptation.
+
+    Stem: 3x3 convolution, stride 1, no initial max-pooling.
+    Spatial reduction occurs only in the first block of layers 2, 3, and 4.
+    """
+
     def __init__(
         self,
-        block: type[Union[BasicBlock, Bottleneck]],
+        block: type[BasicBlock],
         layers: list[int],
         num_classes: int = 200,
         zero_init_residual: bool = False,
@@ -226,14 +228,20 @@ class ResNet(nn.Module):
         replace_stride_with_dilation: Optional[list[bool]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
         filter_size: int = 3,
-        aa_type: str = 'none',
-        wavelet_type: str = 'haar',
-        pasa_group: int = 2
+        aa_type: str = "none",
+        wavelet_type: str = "haar",
+        pasa_group: int = 2,
     ) -> None:
         super().__init__()
+
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
+
+        if aa_type not in _VALID_AA_TYPES:
+            raise ValueError(
+                f"Unknown aa_type {aa_type!r}. Expected one of {sorted(_VALID_AA_TYPES)}"
+            )
 
         self.aa_type = aa_type
         self.wavelet_type = wavelet_type
@@ -245,127 +253,93 @@ class ResNet(nn.Module):
         if replace_stride_with_dilation is None:
             replace_stride_with_dilation = [False, False, False]
         if len(replace_stride_with_dilation) != 3:
-            raise ValueError("replace_stride_with_dilation should be None " f"or a 3-element tuple, got {replace_stride_with_dilation}")
+            raise ValueError(
+                "replace_stride_with_dilation should be None or a 3-element "
+                f"list/tuple, got {replace_stride_with_dilation}"
+            )
+
         self.groups = groups
         self.base_width = width_per_group
 
-        self.dab_controller = DABSigmaController(num_downsample_layers=4) if aa_type == 'dab' else None
+        # With the CIFAR/small-image stem there is no initial pooling stage.
+        # Therefore ResNet-18 has exactly three spatial downsampling stages:
+        # layer2, layer3, layer4.
+        num_downsample_levels = sum(
+            1 for dilate in replace_stride_with_dilation if not dilate
+        )
+        self.dab_controller = (
+            DABSigmaController(num_downsample_layers=num_downsample_levels)
+            if aa_type == "dab"
+            else None
+        )
+
+        # DABPool alone needs an explicit depth index in this comparison.
+        # ASAP uses the official small-padding variant (ASAPsp); the alternating
+        # transpose heuristic belongs to the separate ASAPstbl variant and is
+        # intentionally not enabled here.
         self.dab_depth = 0
 
-        def get_aa_helper(c, s, d_idx=None):
-            return get_aa_layer(c, s, self.aa_type, self.wavelet_type, self.filter_size, self.pasa_group,
-                                dab_controller=self.dab_controller, depth_index=d_idx)
-        
-        # --- Head Configuration ---
-        # CIFAR-Style / Tiny-ImageNet stem:
-        # Keep the initial convolution dense. Spatial downsampling starts in self.pool.
+        # CIFAR/small-image stem: only the ImageNet stem is changed.
         self.conv1 = nn.Conv2d(
             3,
             self.inplanes,
             kernel_size=3,
             stride=1,
             padding=1,
-            bias=False
+            bias=False,
         )
-
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
 
-        # ---------------------------------------------------------
-        # First downsampling operation
-        # ---------------------------------------------------------
+        # No initial MaxPool.
+        self.layer1 = self._make_layer(block, 64, layers[0], stride=1)
+        self.layer2 = self._make_layer(
+            block,
+            128,
+            layers[1],
+            stride=2,
+            dilate=replace_stride_with_dilation[0],
+        )
+        self.layer3 = self._make_layer(
+            block,
+            256,
+            layers[2],
+            stride=2,
+            dilate=replace_stride_with_dilation[1],
+        )
+        self.layer4 = self._make_layer(
+            block,
+            512,
+            layers[3],
+            stride=2,
+            dilate=replace_stride_with_dilation[2],
+        )
 
-        if self.aa_type == 'none':
-            # Vanilla baseline:
-            # MaxPool(k=3, s=2)
-            self.pool = nn.MaxPool2d(
-                kernel_size=3,
-                stride=2,
-                padding=1
-            )
-
-        elif self.aa_type in ('dwt', 'asap'):
-            # WaveCNet, Eq. (14):
-            #
-            # MaxPool_s=2 -> DWT_LL
-            #
-            # IMPORTANT:
-            # Do NOT keep a stride-1 MaxPool in front of DWT.
-            # DWT_2D_tiny already performs filtering + 2x downsampling.
-            self.pool = get_aa_helper(
-                self.inplanes,
-                2
-            )
-
-        else:
-            # BlurPool / PASA / DAB / avg:
-            #
-            # Preserve the existing integration:
-            # DenseMax(s=1) -> AA/downsampling layer
-            #
-            # DAB additionally requires the current depth index.
-            depth_index = (
-                self.dab_depth
-                if self.aa_type == 'dab'
-                else None
-            )
-
-            aa = get_aa_helper(
-                self.inplanes,
-                2,
-                depth_index
-            )
-
-            # Preserve the old fallback behavior for unknown aa_type values.
-            if isinstance(aa, nn.Identity):
-                self.pool = nn.MaxPool2d(
-                    kernel_size=3,
-                    stride=2,
-                    padding=1
-                )
-            else:
-                self.pool = nn.Sequential(
-                    nn.MaxPool2d(
-                        kernel_size=3,
-                        stride=1,
-                        padding=1
-                    ),
-                    aa
-                )
-
-                # Only DAB uses the depth counter.
-                if self.aa_type == 'dab':
-                    self.dab_depth += 1
-
-        # --- Layers ---
-        self.layer1 = self._make_layer(block, 64, layers[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
-        
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
-        # --- Initialization ---
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
+                if m.weight is not None:
+                    nn.init.constant_(m.weight, 1)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
-        # Zero-initialize the last BN in each residual branch,
-        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
-        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
         if zero_init_residual:
             for m in self.modules():
-                if isinstance(m, Bottleneck) and m.bn3.weight is not None:
-                    nn.init.constant_(m.bn3.weight, 0)
-                elif isinstance(m, BasicBlock) and m.bn2.weight is not None:
+                if isinstance(m, BasicBlock) and m.bn2.weight is not None:
                     nn.init.constant_(m.bn2.weight, 0)
 
-
-    def _make_layer(self, block, planes, blocks, stride=1, dilate=False):
+    def _make_layer(
+        self,
+        block: type[BasicBlock],
+        planes: int,
+        blocks: int,
+        stride: int = 1,
+        dilate: bool = False,
+    ) -> nn.Sequential:
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation
@@ -374,94 +348,63 @@ class ResNet(nn.Module):
             self.dilation *= stride
             stride = 1
 
+        out_channels = planes * block.expansion
         current_depth = (
             self.dab_depth
-            if self.aa_type == 'dab'
+            if self.aa_type == "dab" and stride != 1
             else None
         )
 
-        # A projection shortcut is only needed when:
-        # 1. spatial resolution changes, or
-        # 2. channel count changes.
-        if stride != 1 or self.inplanes != planes * block.expansion:
-
-            out_channels = planes * block.expansion
-
-            if self.aa_type == 'none':
-                # Baseline shortcut:
-                # Conv1x1 with the original stride.
+        if stride != 1 or self.inplanes != out_channels:
+            if self.aa_type == "none" or stride == 1:
+                # Standard CIFAR/small-image ResNet projection shortcut.
                 downsample = nn.Sequential(
-                    conv1x1(
-                        self.inplanes,
-                        out_channels,
-                        stride
-                    ),
-                    norm_layer(out_channels)
+                    conv1x1(self.inplanes, out_channels, stride=stride),
+                    norm_layer(out_channels),
                 )
 
-            elif self.aa_type in ('dab', 'dwt'):
-                # DAB / WaveCNet:
-                #
-                # Conv1x1(s=2)
-                # becomes
-                # Conv1x1(s=1) -> AA/downsampling
-                #
-                # Since AA runs AFTER the projection, it operates
-                # on out_channels.
-                shortcut_aa = get_aa_layer(
-                    out_channels,
-                    stride,
-                    self.aa_type,
-                    self.wavelet_type,
-                    self.filter_size,
-                    self.pasa_group,
+            elif self.aa_type in _POST_CONV_AA:
+                # WaveCNet / DABPool:
+                # Conv1x1(s1) -> AA(s2) -> BN
+                shortcut_aa = _build_aa_layer(
+                    channels=out_channels,
+                    stride=stride,
+                    aa_type=self.aa_type,
+                    wavelet_type=self.wavelet_type,
+                    filter_size=self.filter_size,
+                    pasa_group=self.pasa_group,
                     dab_controller=self.dab_controller,
-                    depth_index=current_depth
+                    depth_index=current_depth,
+                )
+                downsample = nn.Sequential(
+                    conv1x1(self.inplanes, out_channels, stride=1),
+                    shortcut_aa,
+                    norm_layer(out_channels),
                 )
 
+            elif self.aa_type in (_POST_ACTIVATION_AA | _PRE_CONV_AA):
+                # BlurPool / PASA / ASAP:
+                # AA(s2) -> Conv1x1(s1) -> BN
+                shortcut_aa = _build_aa_layer(
+                    channels=self.inplanes,
+                    stride=stride,
+                    aa_type=self.aa_type,
+                    wavelet_type=self.wavelet_type,
+                    filter_size=self.filter_size,
+                    pasa_group=self.pasa_group,
+                    dab_controller=self.dab_controller,
+                    depth_index=current_depth,
+                )
                 downsample = nn.Sequential(
-                    conv1x1(
-                        self.inplanes,
-                        out_channels,
-                        stride=1
-                    ),
                     shortcut_aa,
-                    norm_layer(out_channels)
+                    conv1x1(self.inplanes, out_channels, stride=1),
+                    norm_layer(out_channels),
                 )
 
             else:
-                # BlurPool / PASA / ASAP / avg:
-                # Preserve the existing AA-before-projection integration.
-                shortcut_aa = get_aa_layer(
-                    self.inplanes,
-                    stride,
-                    self.aa_type,
-                    self.wavelet_type,
-                    self.filter_size,
-                    self.pasa_group,
-                    dab_controller=self.dab_controller,
-                    depth_index=current_depth
-                )
+                raise ValueError(f"Unsupported aa_type: {self.aa_type}")
 
-                downsample = nn.Sequential(
-                    shortcut_aa,
-                    conv1x1(
-                        self.inplanes,
-                        out_channels,
-                        stride=1
-                    ),
-                    norm_layer(out_channels)
-                )
-
-        # One new DAB depth level per actual spatial downsampling stage.
-        # Main branch and shortcut both use current_depth above;
-        # only afterwards do we advance to the next level.
-        if stride != 1 and self.aa_type == 'dab':
-            self.dab_depth += 1
-
-        layers = []
-
-        layers.append(
+        layers = [
             block(
                 self.inplanes,
                 planes,
@@ -476,11 +419,14 @@ class ResNet(nn.Module):
                 self.wavelet_type,
                 self.pasa_group,
                 dab_controller=self.dab_controller,
-                depth_index=current_depth if stride != 1 else None
+                depth_index=current_depth,
             )
-        )
+        ]
 
-        self.inplanes = planes * block.expansion
+        self.inplanes = out_channels
+
+        if stride != 1 and self.aa_type == "dab":
+            self.dab_depth += 1
 
         for _ in range(1, blocks):
             layers.append(
@@ -496,7 +442,7 @@ class ResNet(nn.Module):
                     wavelet_type=self.wavelet_type,
                     pasa_group=self.pasa_group,
                     dab_controller=self.dab_controller,
-                    depth_index=None
+                    depth_index=None,
                 )
             )
 
@@ -506,9 +452,8 @@ class ResNet(nn.Module):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
-        
-        x = self.pool(x)
 
+        # No initial pooling in the CIFAR/small-image adaptation.
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -517,7 +462,6 @@ class ResNet(nn.Module):
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         x = self.fc(x)
-
         return x
 
     def forward(self, x: Tensor) -> Tensor:
@@ -528,18 +472,20 @@ def resnet18(
     *,
     progress: bool = True,
     filter_size: int = 3,
-    aa_type: str = 'none',
-    wavelet_type: str = 'haar',
+    aa_type: str = "none",
+    wavelet_type: str = "haar",
     pasa_group: int = 2,
-    **kwargs: Any
+    **kwargs: Any,
 ) -> nn.Module:
-    model = ResNet(
+    # `progress` is retained for API compatibility with existing callers.
+    del progress
+
+    return ResNet(
         BasicBlock,
         [2, 2, 2, 2],
         filter_size=filter_size,
         aa_type=aa_type,
         wavelet_type=wavelet_type,
         pasa_group=pasa_group,
-        **kwargs
+        **kwargs,
     )
-    return model
