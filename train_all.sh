@@ -116,11 +116,11 @@ if [[ "${1:-}" == "worker" ]]; then
                     ;;
 
                 pasa_f3_g8)
-                    CMD=(python -u main.py --arch resnet18 --aa_type pasa --filter_size 3 --pasa_group 8 -ba 2 --seed "$SEED")
+                    CMD=(python -u main.py --arch resnet18 --aa_type pasa --filter_size 3 --pasa_group 8 --seed "$SEED")
                     ;;
 
                 pasa_f5_g8)
-                    CMD=(python -u main.py --arch resnet18 --aa_type pasa --filter_size 5 --pasa_group 8 -ba 2 --seed "$SEED")
+                    CMD=(python -u main.py --arch resnet18 --aa_type pasa --filter_size 5 --pasa_group 8 --seed "$SEED")
                     ;;
 
                 dab_f3)

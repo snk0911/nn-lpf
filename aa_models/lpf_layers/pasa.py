@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .helper_functions import get_pad_layer
 
+
 class Downsample_PASA_group_softmax(nn.Module):
     def __init__(self, in_channels, kernel_size, stride=1, pad_type='reflect', group=2):
         super(Downsample_PASA_group_softmax, self).__init__()

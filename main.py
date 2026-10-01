@@ -61,9 +61,9 @@ parser.add_argument('-ep', '--epochs', default=90, type=int, metavar='N',
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 
-parser.add_argument('-b', '--batch-size', default=128, type=int,
+parser.add_argument('-b', '--batch-size', default=32, type=int,
                     metavar='N',
-                    help='mini-batch size (default: 256), this is the total '
+                    help='mini-batch size (default: 32), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
 
@@ -149,9 +149,9 @@ parser.add_argument('--evaluate_efficiency', action='store_true',
 parser.add_argument('--epochs-shift', default=5, type=int, metavar='N',
                     help='number of total epochs to run for shift-invariance test')
 
-parser.add_argument('-ba', '--batch-accum', default=1, type=int,
+parser.add_argument('-ba', '--batch-accum', default=8, type=int,
                     metavar='N',
-                    help='number of mini-batches to accumulate gradient over before updating (default: 1)')
+                    help='number of mini-batches to accumulate gradient over before updating (default: 8)')
 
 parser.add_argument('--embed', dest='embed', action='store_true',
                     help='embed statement before anything is evaluated (for debugging)')
@@ -883,92 +883,384 @@ def evaluate_diagonal(eval_loader, model, args):
 
 def evaluate_c(eval_loader, model, criterion, args):
     distortions = [
-        'gaussian_noise', 'shot_noise', 'impulse_noise',
-        'defocus_blur', 'glass_blur', 'motion_blur', 'zoom_blur',
-        'snow', 'frost', 'fog', 'brightness',
-        'contrast', 'elastic_transform', 'pixelate', 'jpeg_compression',
+        'gaussian_noise',
+        'shot_noise',
+        'impulse_noise',
+        'defocus_blur',
+        'glass_blur',
+        'motion_blur',
+        'zoom_blur',
+        'snow',
+        'frost',
+        'fog',
+        'brightness',
+        'contrast',
+        'elastic_transform',
+        'pixelate',
+        'jpeg_compression',
     ]
 
-    # Binäre Frequenzgruppen. Ersetze diese Listen durch deine F_hf-Sortierung,
-    # sobald compute_fhf.py auf Tiny ImageNet-C gelaufen ist.
-    # Blurs zählen hier zu 'high' (Saikia et al.: Blur betrifft hohe Frequenzen).
+    # Frequency grouping from:
+    # Li et al. (2023),
+    # "Robust deep learning object recognition models rely on
+    # low frequency information in natural images"
+    # https://doi.org/10.1371/journal.pcbi.1010932
     freq_groups = {
-        'low':  ['frost', 'fog', 'brightness', 'contrast',
-                 'snow', 'elastic_transform'],
-        'high': ['gaussian_noise', 'shot_noise', 'impulse_noise',
-                 'defocus_blur', 'glass_blur', 'motion_blur', 'zoom_blur',
-                 'pixelate', 'jpeg_compression'],
+        'low': [
+            'snow',
+            'frost',
+            'fog',
+            'brightness',
+            'contrast',
+        ],
+        'medium': [
+            'motion_blur',
+            'zoom_blur',
+            'defocus_blur',
+            'glass_blur',
+            'elastic_transform',
+            'jpeg_compression',
+            'pixelate',
+        ],
+        'high': [
+            'gaussian_noise',
+            'shot_noise',
+            'impulse_noise',
+        ],
     }
 
-    # pro Corruption den raw error sammeln (Name -> Fehler)
-    errors = {}
+    corruption_to_group = {
+        corruption: group_name
+        for group_name, corruptions in freq_groups.items()
+        for corruption in corruptions
+    }
 
-    # First get clean error on val set
+    corruption_errors = {}
+    severity_errors = {}
+
     print('\nComputing clean error...')
-    acc1, _, _ = evaluate(eval_loader, model, criterion, args)
-    clean_error = 1. - acc1.item() / 100.
-    print('Clean error: {:.4f}%'.format(100 * clean_error))
+
+    acc1, _, _ = evaluate(
+        eval_loader,
+        model,
+        criterion,
+        args
+    )
+
+    clean_error = 1.0 - acc1.item() / 100.0
+
+    print(
+        'Clean error: {:.4f}%'.format(
+            100.0 * clean_error
+        )
+    )
 
     model.eval()
 
     for distortion_name in distortions:
-        severity_errors = []
+        severity_errors[distortion_name] = {}
 
         for severity in range(1, 6):
             top1 = AverageMeter()
 
-            new_root = os.path.join(args.data_c, distortion_name, str(severity))
+            new_root = os.path.join(
+                args.data_c,
+                distortion_name,
+                str(severity)
+            )
+
             eval_loader.dataset.root = new_root
-            eval_loader.dataset.samples = datasets.ImageFolder(new_root).samples
+            eval_loader.dataset.samples = datasets.ImageFolder(
+                new_root
+            ).samples
             eval_loader.dataset.imgs = eval_loader.dataset.samples
 
             with torch.no_grad():
                 for i, (input, target) in enumerate(eval_loader):
+
                     if args.gpu is not None:
-                        input = input.cuda(args.gpu, non_blocking=True)
-                    target = target.cuda(args.gpu, non_blocking=True)
+                        input = input.cuda(
+                            args.gpu,
+                            non_blocking=True
+                        )
+
+                    target = target.cuda(
+                        args.gpu,
+                        non_blocking=True
+                    )
 
                     output = model(input)
-                    acc1, _ = accuracy(output, target, topk=(1, 5))
-                    top1.update(acc1[0], input.size(0))
+
+                    acc1, _ = accuracy(
+                        output,
+                        target,
+                        topk=(1, 5)
+                    )
+
+                    top1.update(
+                        acc1[0],
+                        input.size(0)
+                    )
 
                     if i % args.print_freq == 0:
-                        print('Distortion: {:20s} | Severity: [{:d}] [{:d}/{:d}]\t'
-                              'Acc@1 {top1.val:.4f} ({top1.avg:.4f})'.format(
-                               distortion_name, severity, i, len(eval_loader), top1=top1))
+                        print(
+                            'Distortion: {:20s} | Severity: [{:d}] '
+                            '[{:d}/{:d}]\t'
+                            'Acc@1 {top1.val:.4f} ({top1.avg:.4f})'.format(
+                                distortion_name,
+                                severity,
+                                i,
+                                len(eval_loader),
+                                top1=top1
+                            )
+                        )
 
-            severity_errors.append(1. - top1.avg.item() / 100.)
+            error = 1.0 - top1.avg.item() / 100.0
 
-        raw_err = np.mean(severity_errors)
-        errors[distortion_name] = raw_err
+            severity_errors[distortion_name][severity] = error
 
-        print('Distortion: {:20s} | Raw Error (%): {:.4f}'.format(
-            distortion_name, 100 * raw_err))
+        corruption_error = np.mean(
+            list(
+                severity_errors[
+                    distortion_name
+                ].values()
+            )
+        )
 
-    # Gesamt-mCE (unverändert: Mittel über alle 15)
-    mce = 100 * np.mean(list(errors.values()))
+        corruption_errors[
+            distortion_name
+        ] = corruption_error
 
-    # mCE pro Frequenzgruppe
-    group_mce = {}
-    for gname, corr_list in freq_groups.items():
-        vals = [errors[c] for c in corr_list if c in errors]
-        group_mce[gname] = 100 * np.mean(vals) if vals else float('nan')
+        print(
+            'Distortion: {:20s} | Mean Error (%): {:.4f}'.format(
+                distortion_name,
+                100.0 * corruption_error
+            )
+        )
 
-    print('\n * Clean Error:  {:.4f}%'.format(100 * clean_error))
-    print(' * mCE (all):    {:.4f}%'.format(mce))
-    for gname in ['low', 'high']:
-        print(' * mCE ({:4s}):   {:.4f}%'.format(gname, group_mce[gname]))
+    overall_error = 100.0 * np.mean(
+        list(
+            corruption_errors.values()
+        )
+    )
+
+    group_errors = {}
+
+    for group_name, corruptions in freq_groups.items():
+        values = [
+            corruption_errors[corruption]
+            for corruption in corruptions
+        ]
+
+        group_errors[group_name] = (
+            100.0 * np.mean(values)
+        )
+
+    group_severity_errors = {
+        group_name: {}
+        for group_name in freq_groups
+    }
+
+    for group_name, corruptions in freq_groups.items():
+        for severity in range(1, 6):
+            values = [
+                severity_errors[corruption][severity]
+                for corruption in corruptions
+            ]
+
+            group_severity_errors[
+                group_name
+            ][severity] = (
+                100.0 * np.mean(values)
+            )
+
+    print('\n========== Corruption Summary ==========')
+
+    print(
+        ' * Clean Error:       {:.4f}%'.format(
+            100.0 * clean_error
+        )
+    )
+
+    print(
+        ' * Overall Error:     {:.4f}%'.format(
+            overall_error
+        )
+    )
+
+    for group_name in [
+        'low',
+        'medium',
+        'high'
+    ]:
+        print(
+            ' * {:6s} Error:      {:.4f}%'.format(
+                group_name.capitalize(),
+                group_errors[group_name]
+            )
+        )
+
+    print('\nFrequency groups by severity:')
+
+    for severity in range(1, 6):
+        print(
+            ' Severity {} | '
+            'Low: {:.4f}% | '
+            'Medium: {:.4f}% | '
+            'High: {:.4f}%'.format(
+                severity,
+                group_severity_errors[
+                    'low'
+                ][severity],
+                group_severity_errors[
+                    'medium'
+                ][severity],
+                group_severity_errors[
+                    'high'
+                ][severity]
+            )
+        )
+
+    results = {
+        'clean_error':
+            100.0 * clean_error,
+
+        'overall_error':
+            overall_error,
+
+        'group_errors':
+            group_errors,
+
+        'group_severity_errors':
+            group_severity_errors,
+
+        'corruption_errors': {
+            name: 100.0 * error
+            for name, error
+            in corruption_errors.items()
+        },
+
+        'severity_errors': {
+            distortion_name: {
+                severity: 100.0 * error
+                for severity, error
+                in severity_dict.items()
+            }
+            for distortion_name, severity_dict
+            in severity_errors.items()
+        },
+    }
+
+    # Save all corruption x severity results of this seed.
+    rows = []
+
+    for distortion_name in distortions:
+        group_name = corruption_to_group[
+            distortion_name
+        ]
+
+        for severity in range(1, 6):
+            rows.append({
+                'seed':
+                    args.seed,
+
+                'corruption':
+                    distortion_name,
+
+                'frequency_group':
+                    group_name,
+
+                'severity':
+                    severity,
+
+                'error':
+                    results[
+                        'severity_errors'
+                    ][distortion_name][severity],
+            })
+
+    csv_path = (
+        f'corruption_results_seed_{args.seed}.csv'
+    )
+
+    with open(
+        csv_path,
+        'w',
+        newline=''
+    ) as f:
+
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                'seed',
+                'corruption',
+                'frequency_group',
+                'severity',
+                'error',
+            ]
+        )
+
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(
+        '\nSaved corruption results to: {}'.format(
+            csv_path
+        )
+    )
 
     if args.wandb:
         import wandb
-        wandb.log({
-            'clean_error': 100 * clean_error,
-            'mCE':         mce,
-            'mCE_low':     group_mce['low'],
-            'mCE_high':    group_mce['high'],
-        })
 
-    return mce, clean_error * 100
+        log_data = {
+            'clean_error':
+                results['clean_error'],
+
+            'corruption_error_all':
+                overall_error,
+
+            'corruption_error_low':
+                group_errors['low'],
+
+            'corruption_error_medium':
+                group_errors['medium'],
+
+            'corruption_error_high':
+                group_errors['high'],
+        }
+
+        for group_name in [
+            'low',
+            'medium',
+            'high'
+        ]:
+            for severity in range(1, 6):
+
+                log_data[
+                    f'corruption_{group_name}_s{severity}'
+                ] = group_severity_errors[
+                    group_name
+                ][severity]
+
+        for distortion_name in distortions:
+
+            log_data[
+                f'corruption_{distortion_name}'
+            ] = results[
+                'corruption_errors'
+            ][distortion_name]
+
+            for severity in range(1, 6):
+
+                log_data[
+                    f'corruption_{distortion_name}_s{severity}'
+                ] = results[
+                    'severity_errors'
+                ][distortion_name][severity]
+
+        wandb.log(log_data)
+
+    return results
 
 
 def evaluate_save(eval_loader, mean, std, args):
