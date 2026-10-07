@@ -1,3 +1,4 @@
+from aa_models.lpf_layers.asap import ASAP, ASAP_padding_large
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -72,7 +73,13 @@ def get_aa_layer(
             group=pasa_group,
         )
 
-    if aa_type == "asap":
+    if aa_type == "asap_stbl":
+        return ASAP()
+
+    if aa_type == "asap_lp":
+        return ASAP_padding_large()
+
+    if aa_type == "asap_sp":
         return ASAP_padding_one()
 
     return nn.Identity()

@@ -9,7 +9,7 @@ from .lpf_layers import *
 __all__ = ["ResNet", "resnet18"]
 
 
-_VALID_AA_TYPES = {"none", "blur", "dwt", "pasa", "dab", "asap"}
+_VALID_AA_TYPES = {"none", "blur", "dwt", "pasa", "dab", "asap_sp", "asap_stbl", "asap_lp"}
 
 # BlurPool and PASA follow the Zhang-style residual-block integration:
 # dense conv -> BN -> ReLU -> AA/downsample -> next dense conv.
@@ -23,7 +23,7 @@ _POST_CONV_AA = {"dwt", "dab"}
 # ASAP's official resnet_asap.py wraps every stride>1 convolution as
 # ASAP_padding_one() -> dense convolution. This is the ASAPsp (small-padding)
 # topology used here at the three shared stage-transition downsampling sites.
-_PRE_CONV_AA = {"asap"}
+_PRE_CONV_AA = {"asap_sp", "asap_stbl", "asap_lp"}
 
 
 def conv3x3(
