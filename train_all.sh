@@ -41,6 +41,14 @@ if [[ "${1:-}" == "worker" ]]; then
 
     export CUDA_VISIBLE_DEVICES="$GPU"
 
+    # Fixed training protocol used for every configuration.
+    COMMON_ARGS=(
+        python -u main.py
+        --arch resnet18
+        -b 32
+        -ba 8
+    )
+
     echo "Worker started"
     echo "GPU:    $GPU"
     echo "Conda:  $CONDA_DEFAULT_ENV"
@@ -84,59 +92,83 @@ if [[ "${1:-}" == "worker" ]]; then
 
             case "$JOB" in
                 baseline)
-                    CMD=(python -u main.py --arch resnet18 --aa_type none --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type none --seed "$SEED" --amp)
                     ;;
 
                 blur_f2)
-                    CMD=(python -u main.py --arch resnet18 --aa_type blur --filter_size 2 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 2 --seed "$SEED" --amp)
                     ;;
 
                 blur_f3)
-                    CMD=(python -u main.py --arch resnet18 --aa_type blur --filter_size 3 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 3 --seed "$SEED" --amp)
                     ;;
 
                 blur_f5)
-                    CMD=(python -u main.py --arch resnet18 --aa_type blur --filter_size 5 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 5 --seed "$SEED" --amp)
                     ;;
 
                 dwt_haar)
-                    CMD=(python -u main.py --arch resnet18 --aa_type dwt --wavelet_type haar --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type haar --seed "$SEED" --amp)
                     ;;
 
                 dwt_db2)
-                    CMD=(python -u main.py --arch resnet18 --aa_type dwt --wavelet_type db2 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type db2 --seed "$SEED" --amp)
                     ;;
 
                 dwt_db4)
-                    CMD=(python -u main.py --arch resnet18 --aa_type dwt --wavelet_type db4 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type db4 --seed "$SEED" --amp)
                     ;;
 
                 dwt_bior3_3)
-                    CMD=(python -u main.py --arch resnet18 --aa_type dwt --wavelet_type bior3.3 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type bior3.3 --seed "$SEED" --amp)
+                    ;;
+
+                pasa_f3_g1)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 1 --seed "$SEED" --amp)
+                    ;;
+
+                pasa_f3_g2)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 2 --seed "$SEED" --amp)
+                    ;;
+
+                pasa_f3_g4)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 4 --seed "$SEED" --amp)
                     ;;
 
                 pasa_f3_g8)
-                    CMD=(python -u main.py --arch resnet18 --aa_type pasa --filter_size 3 --pasa_group 8 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 8 --seed "$SEED" --amp)
+                    ;;
+
+                pasa_f3_g16)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 16 --seed "$SEED" --amp)
                     ;;
 
                 pasa_f5_g8)
-                    CMD=(python -u main.py --arch resnet18 --aa_type pasa --filter_size 5 --pasa_group 8 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 5 --pasa_group 8 --seed "$SEED" --amp)
                     ;;
 
                 dab_f3)
-                    CMD=(python -u main.py --arch resnet18 --aa_type dab --filter_size 3 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 3 --seed "$SEED" --amp)
                     ;;
 
                 dab_f5)
-                    CMD=(python -u main.py --arch resnet18 --aa_type dab --filter_size 5 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 5 --seed "$SEED" --amp)
                     ;;
 
                 dab_f7)
-                    CMD=(python -u main.py --arch resnet18 --aa_type dab --filter_size 7 --seed "$SEED")
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 7 --seed "$SEED" --amp)
                     ;;
 
-                asap)
-                    CMD=(python -u main.py --arch resnet18 --aa_type asap --seed "$SEED")
+                asap_sp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_sp --seed "$SEED" --amp)
+                    ;;
+
+                asap_stbl)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_stbl --seed "$SEED" --amp)
+                    ;;
+
+                asap_lp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_lp --seed "$SEED" --amp)
                     ;;
 
                 *)
@@ -217,12 +249,18 @@ dwt_haar
 dwt_db2
 dwt_db4
 dwt_bior3_3
+pasa_f3_g1
+pasa_f3_g2
+pasa_f3_g4
 pasa_f3_g8
+pasa_f3_g16
 pasa_f5_g8
 dab_f3
 dab_f5
 dab_f7
-asap
+asap_sp
+asap_stbl
+asap_lp
 JOBS
 
 echo 1 > "$QUEUE_INDEX"
@@ -241,8 +279,8 @@ echo "Project: $PROJECT_DIR"
 echo "Conda:   $CONDA_ENV"
 echo "GPUs:    $GPU0, $GPU1"
 echo "Seeds:   ${SEEDS[*]}"
-echo "Configs: 14"
-echo "Runs:    70"
+echo "Configs: 20"
+echo "Runs:    100"
 echo
 
 screen -dmS thesis_gpu0 \

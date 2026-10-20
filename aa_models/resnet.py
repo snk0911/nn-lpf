@@ -9,11 +9,11 @@ from .lpf_layers import *
 __all__ = ["ResNet", "resnet18"]
 
 
-_VALID_AA_TYPES = {"none", "blur", "dwt", "pasa", "dab", "asap_sp", "asap_stbl", "asap_lp"}
+_VALID_AA_TYPES = {"none", "blur", "dwt", "pasa", "dab", "asap_sp", "asap_stbl", "asap_lp", "pasa_efficient"}
 
 # BlurPool and PASA follow the Zhang-style residual-block integration:
 # dense conv -> BN -> ReLU -> AA/downsample -> next dense conv.
-_POST_ACTIVATION_AA = {"blur", "pasa"}
+_POST_ACTIVATION_AA = {"blur", "pasa", "pasa_efficient"}
 
 # WaveCNet Eq. (15) and DABPool Eq. (4) both replace a strided convolution
 # by a dense convolution followed immediately by their downsampling operator.

@@ -5,5 +5,5 @@ SEEDS=(1 2 3 4 5)
 export CUDA_VISIBLE_DEVICES=$GPU
 
 for SEED in "${SEEDS[@]}"; do
-    python main.py --arch resnet18 --aa_type none --seed $SEED
+    python main.py --arch resnet18 --aa_type none --seed $SEED --amp
 done

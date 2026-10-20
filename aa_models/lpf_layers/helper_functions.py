@@ -22,6 +22,7 @@ def get_aa_layer(
     from .dwt import DWT_2D_tiny
     from .asap import ASAP_padding_one
     from .pasa import Downsample_PASA_group_softmax
+    from .pasa_efficient import Downsample_PASA_group_softmax_efficient
     from .dab import DABPool
 
     if stride == 1:
@@ -73,14 +74,22 @@ def get_aa_layer(
             group=pasa_group,
         )
 
+    if aa_type == "pasa_efficient":
+        return Downsample_PASA_group_softmax_efficient(
+            channels,
+            filter_size,
+            stride,
+            group=pasa_group,
+        )
+
     if aa_type == "asap_stbl":
         return ASAP()
 
+    if aa_type == "asap_sp":
+        return ASAP_padding_one()   
+
     if aa_type == "asap_lp":
         return ASAP_padding_large()
-
-    if aa_type == "asap_sp":
-        return ASAP_padding_one()
 
     return nn.Identity()
 

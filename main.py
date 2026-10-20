@@ -56,7 +56,7 @@ parser.add_argument('--wavelet_type', type=str, default='db2', help='Type of wav
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 
-parser.add_argument('-ep', '--epochs', default=90, type=int, metavar='N',
+parser.add_argument('-ep', '--epochs', default=50, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -66,15 +66,31 @@ parser.add_argument('-b', '--batch-size', default=32, type=int,
                     help='mini-batch size (default: 32), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-
-parser.add_argument('-lr', '--learning_rate', default=0.1, type=float, metavar='LR', help='initial learning rate', dest='lr')
-parser.add_argument('--lr_scheduler', default='cosine', choices=['step', 'cosine','exponential','plateau'], help='learning rate scheduler (default: cosine)')
-parser.add_argument("--lr_warmup_epochs", default=5, type=int, help="the number of epochs to warmup (default: 0)")
+parser.add_argument(
+    '--amp',
+    action='store_true',
+    help='Enable FP16 mixed precision (default: FP32)'
+)
+parser.add_argument(
+    '-lr', '--learning_rate', '--learning-rate',
+    dest='lr',
+    default=0.2,
+    type=float,
+    metavar='LR',
+    help='initial learning rate'
+)
+parser.add_argument(
+    '--lr-scheduler', '--lr_scheduler',
+    dest='lr_scheduler',
+    default='cosine',
+    choices=['step', 'cosine', 'exponential', 'plateau']
+)
+parser.add_argument("--lr-warmup-epochs", default=5, type=int, help="the number of epochs to warmup (default: 0)")
 parser.add_argument("--lr-warmup-method", default="linear", type=str, help="the warmup method (default: linear)")
-parser.add_argument("--lr_warmup_decay", default=0.01, type=float, help="the decay for lr")
-parser.add_argument("--lr_step_size", default=30, type=int, help="decrease lr every step-size epochs")
-parser.add_argument("--lr_gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
-parser.add_argument("--lr_min", default=0.0, type=float, help="minimum lr of lr schedule (default: 0.0)")
+parser.add_argument("--lr-warmup-decay", default=0.01, type=float, help="the decay for lr")
+parser.add_argument("--lr-step-size", default=30, type=int, help="decrease lr every step-size epochs")
+parser.add_argument("--lr-gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
+parser.add_argument("--lr-min", default=0.0, type=float, help="minimum lr of lr schedule (default: 0.0)")
 
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -126,10 +142,6 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
 
 parser.add_argument('--eval_test', dest='eval_test', action='store_true',
                     help='Switch evaluation to use the test directory instead of validation')
-
-# Added functionality from PyTorch codebase
-parser.add_argument('--no-data-aug', dest='no_data_aug', action='store_true',
-                    help='no shift-based data augmentation')
 
 parser.add_argument('--output', dest='out_dir', default='./out', type=str,
                     help='output directory')
@@ -203,12 +215,16 @@ def main():
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
         random.seed(args.seed)
-        np.random.seed(args.seed) # Zhang forgot to add this so validate_shift is deterministic and therefore reproducable
+        np.random.seed(args.seed) # Zhang forgot to add this so validate_shift is deterministic and therefore reproducible
         torch.manual_seed(args.seed)
         cudnn.deterministic = True
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+        print("cuBLAS config:", os.environ.get("CUBLAS_WORKSPACE_CONFIG"))
+        print("Deterministic:", torch.are_deterministic_algorithms_enabled())
+
         warnings.warn(
             '\nYou have chosen to seed training.\n'  # <-- Add \n here
             'This will turn on the CUDNN deterministic setting,\n'
@@ -333,25 +349,39 @@ def main_worker(gpu, ngpus_per_node, args):
         nesterov=True
     )
 
+    scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
+
     # optionally resume from a checkpoint
+    checkpoint = None
+
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume)
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
-            if('optimizer' in checkpoint.keys()): # if no optimizer, then only load weights
+            checkpoint = torch.load(args.resume, weights_only=False)
+
+            raw_model = model.module if hasattr(model, 'module') else model
+
+            raw_model.load_state_dict(
+                checkpoint['state_dict'],
+                strict=True
+)
+
+            if 'optimizer' in checkpoint:
                 args.start_epoch = checkpoint['epoch']
                 best_acc1 = checkpoint['best_acc1']
-                if args.gpu is not None:
-                    # best_acc1 may be from a checkpoint from a different GPU
+
+                if args.gpu is not None and hasattr(best_acc1, 'to'):
                     best_acc1 = best_acc1.to(args.gpu)
-                optimizer.load_state_dict(checkpoint['optimizer'])
             else:
                 print('  No optimizer saved')
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
+
+            print("=> loaded checkpoint '{}' (epoch {})".format(
+                args.resume, checkpoint['epoch']
+            ))
         else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
+            raise FileNotFoundError(
+                f"Resume checkpoint not found: {args.resume}"
+            )
 
     # Data loading code
     train_dir = os.path.join(args.data, 'train')
@@ -387,10 +417,20 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler,
         worker_init_fn=seed_worker,
-        generator=g)
+        generator=g,
+        persistent_workers=args.workers > 0
+    )
 
-    crop_size = 72 if(args.evaluate_shift or args.evaluate_diagonal or args.evaluate_save) else 64
-    args.batch_size = 1 if (args.evaluate_diagonal or args.evaluate_save) else args.batch_size
+    is_shift_eval = (
+        args.evaluate_shift
+        or args.evaluate_diagonal
+        or args.evaluate_save
+    )
+
+    args.batch_size = (
+        1 if (args.evaluate_diagonal or args.evaluate_save)
+        else args.batch_size
+    )
 
     if args.eval_test:
         chosen_eval_dir = test_dir
@@ -399,15 +439,40 @@ def main_worker(gpu, ngpus_per_node, args):
         chosen_eval_dir = val_dir
         print("Using validation dataset for evaluation.")
 
+    eval_transforms = []
+
+    if is_shift_eval:
+        eval_transforms.append(
+            transforms.Resize(
+                72,
+                interpolation=transforms.InterpolationMode.NEAREST
+            )
+        )
+
+    eval_transforms.extend([
+        transforms.ToTensor(),
+        normalize
+    ])
+
+    eval_dataset = datasets.ImageFolder(
+        chosen_eval_dir,
+        transform=transforms.Compose(eval_transforms)
+    )
+
+    # Verify consistent class indices
+    if train_dataset.class_to_idx != eval_dataset.class_to_idx:
+        raise ValueError(
+            "Training and evaluation class mappings differ"
+        )
+
     eval_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(chosen_eval_dir, transforms.Compose([
-            transforms.Resize(72, interpolation=transforms.InterpolationMode.NEAREST), # InterpolationMode.NEAREST so no additional blur during eval 
-            transforms.CenterCrop(crop_size),
-            transforms.ToTensor(),
-            normalize,
-        ])),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.workers, pin_memory=True)
+        eval_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=args.workers > 0
+    )
 
     if args.val_debug:
         if args.eval_test:
@@ -505,16 +570,47 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         lr_scheduler = main_lr_scheduler
 
+    # Restore optimizer, scheduler and AMP scaler state
+    if checkpoint is not None and 'optimizer' in checkpoint:
+        if 'lr_scheduler' not in checkpoint:
+            raise RuntimeError("Checkpoint missing LR scheduler state")
+
+        # Check AMP compatibility
+        saved_amp = checkpoint.get('amp', False)
+
+        if saved_amp != args.amp:
+            raise ValueError(
+                f"AMP mismatch: checkpoint={saved_amp}, "
+                f"current run={args.amp}"
+            )
+
+        # Restore optimizer and scheduler
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
+        # Restore GradScaler only for AMP training
+        if args.amp:
+            if 'scaler' not in checkpoint:
+                raise RuntimeError("AMP checkpoint missing scaler state")
+
+            scaler.load_state_dict(checkpoint['scaler'])
+
+        print("=> optimizer, LR scheduler and AMP state restored")
+
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # Log current LR before training/eval
         if args.wandb:
-            wandb.log({'learning_rate': optimizer.param_groups[0]['lr']}, step=epoch, commit=False)
+            wandb.log(
+                {'learning_rate': optimizer.param_groups[0]['lr']},
+                step=epoch * len(train_loader),
+                commit=False
+            )
 
         # Train
-        train(train_loader, model, criterion, optimizer, epoch, args)
+        train(train_loader, model, criterion, optimizer, epoch, args, scaler)
 
         # Evaluate
         acc1, val_loss, _ = evaluate(eval_loader, model, criterion, args)
@@ -544,6 +640,8 @@ def main_worker(gpu, ngpus_per_node, args):
                     'best_acc1': best_acc1,
                     'optimizer': optimizer.state_dict(),
                     'lr_scheduler': lr_scheduler.state_dict(),
+                    'amp': args.amp,
+                    'scaler': scaler.state_dict(),
                 },
                 is_best,
                 epoch,
@@ -552,7 +650,8 @@ def main_worker(gpu, ngpus_per_node, args):
             )
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+
+def train(train_loader, model, criterion, optimizer, epoch, args, scaler):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -564,7 +663,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
 
     end = time.time()
     accum_track = 0
-    optimizer.zero_grad()
+    accumulated_samples = 0
+    optimizer.zero_grad(set_to_none=True)
+
     for i, (input, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
@@ -573,9 +674,14 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
             input = input.cuda(args.gpu, non_blocking=True)
         target = target.cuda(args.gpu, non_blocking=True)
 
-        # compute output
-        output = model(input)
-        loss = criterion(output, target)
+        # compute output (optional FP16 AMP)
+        with torch.autocast(
+            device_type="cuda",
+            dtype=torch.float16,
+            enabled=args.amp
+        ):
+            output = model(input)
+            loss = criterion(output, target)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -583,14 +689,37 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         top1.update(acc1[0], input.size(0))
         top5.update(acc5[0], input.size(0))
 
-        # compute gradient and do SGD step
-        loss.backward()
+        # Accumulate sample-weighted gradients
+        batch_samples = input.size(0)
+        scaler.scale(loss * batch_samples).backward()
 
-        accum_track+=1
-        if(accum_track==args.batch_accum):
-            optimizer.step()
+        accumulated_samples += batch_samples
+        accum_track += 1
+
+        # Handle complete and incomplete accumulation windows
+        should_step = (
+            accum_track == args.batch_accum
+            or (i + 1) == len(train_loader)
+            or (i + 1) >= args.max_train_iters
+        )
+
+        if should_step:
+            # Unscale gradients after accumulation
+            scaler.unscale_(optimizer)
+
+            # Normalize by the actual number of samples
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad.div_(accumulated_samples)
+
+            # Optimizer step (automatically handles AMP/FP32)
+            scaler.step(optimizer)
+            scaler.update()
+
+            optimizer.zero_grad(set_to_none=True)
+
             accum_track = 0
-            optimizer.zero_grad()
+            accumulated_samples = 0
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -606,7 +735,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
                    epoch, i, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses, top1=top1, top5=top5))
 
-            if(args.wandb):
+            if args.wandb:
                 import wandb
                 global_step = i + (epoch * len(train_loader))
                 wandb.log(
@@ -617,11 +746,12 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
                         'train_avg_acc@1': top1.avg,
                         'train_acc@5': top5.val,
                         'train_avg_acc@5': top5.avg,
-                        'epoch': 1.*global_step/len(train_loader), 
+                        'epoch': 1. * global_step / len(train_loader),
                     },
-                    step=global_step)
+                    step=global_step
+                )
 
-        if(i > args.max_train_iters):
+        if (i + 1) >= args.max_train_iters:
             break
 
 
@@ -773,8 +903,8 @@ def evaluate_shift(eval_loader, model, args):
                     input = input.cuda(args.gpu, non_blocking=True)
                 target = target.cuda(args.gpu, non_blocking=True)
 
-                off0 = np.random.randint(8, size=2)
-                off1 = np.random.randint(8, size=2)
+                off0 = np.random.randint(9, size=2)
+                off1 = np.random.randint(9, size=2)
 
                 output0 = model(input[:,:,off0[0]:off0[0]+64,off0[1]:off0[1]+64])
                 output1 = model(input[:,:,off1[0]:off1[0]+64,off1[1]:off1[1]+64])
@@ -900,10 +1030,7 @@ def evaluate_c(eval_loader, model, criterion, args):
         'jpeg_compression',
     ]
 
-    # Frequency grouping from:
-    # Li et al. (2023),
-    # "Robust deep learning object recognition models rely on
-    # low frequency information in natural images"
+    # Frequency grouping from Li et al. (2023)
     # https://doi.org/10.1371/journal.pcbi.1010932
     freq_groups = {
         'low': [
@@ -947,7 +1074,7 @@ def evaluate_c(eval_loader, model, criterion, args):
         args
     )
 
-    clean_error = 1.0 - acc1.item() / 100.0
+    clean_error = 1.0 - float(acc1) / 100.0
 
     print(
         'Clean error: {:.4f}%'.format(
@@ -969,14 +1096,31 @@ def evaluate_c(eval_loader, model, criterion, args):
                 str(severity)
             )
 
-            eval_loader.dataset.root = new_root
-            eval_loader.dataset.samples = datasets.ImageFolder(
-                new_root
-            ).samples
-            eval_loader.dataset.imgs = eval_loader.dataset.samples
+            # Create a separate dataset for each corruption.
+            # This avoids stale worker datasets when
+            # persistent_workers=True in the original loader.
+            corruption_dataset = datasets.ImageFolder(
+                new_root,
+                transform=eval_loader.dataset.transform
+            )
+
+            # Ensure class labels match the clean dataset.
+            if corruption_dataset.class_to_idx != eval_loader.dataset.class_to_idx:
+                raise ValueError(
+                    f"Class mapping mismatch: {new_root}"
+                )
+
+            corruption_loader = torch.utils.data.DataLoader(
+                corruption_dataset,
+                batch_size=eval_loader.batch_size,
+                shuffle=False,
+                num_workers=eval_loader.num_workers,
+                pin_memory=eval_loader.pin_memory,
+                persistent_workers=False
+            )
 
             with torch.no_grad():
-                for i, (input, target) in enumerate(eval_loader):
+                for i, (input, target) in enumerate(corruption_loader):
 
                     if args.gpu is not None:
                         input = input.cuda(
@@ -1010,26 +1154,29 @@ def evaluate_c(eval_loader, model, criterion, args):
                                 distortion_name,
                                 severity,
                                 i,
-                                len(eval_loader),
+                                len(corruption_loader),
                                 top1=top1
                             )
                         )
 
-            error = 1.0 - top1.avg.item() / 100.0
+            error = 1.0 - float(top1.avg) / 100.0
 
             severity_errors[distortion_name][severity] = error
 
-        corruption_error = np.mean(
-            list(
-                severity_errors[
-                    distortion_name
-                ].values()
+            # Log one final result per corruption and severity.
+            print(
+                f"Corruption result | seed={args.seed} | "
+                f"corruption={distortion_name} | "
+                f"frequency_group={corruption_to_group[distortion_name]} | "
+                f"severity={severity} | "
+                f"error_pct={100.0 * error:.4f}"
             )
+
+        corruption_error = np.mean(
+            list(severity_errors[distortion_name].values())
         )
 
-        corruption_errors[
-            distortion_name
-        ] = corruption_error
+        corruption_errors[distortion_name] = corruption_error
 
         print(
             'Distortion: {:20s} | Mean Error (%): {:.4f}'.format(
@@ -1039,9 +1186,7 @@ def evaluate_c(eval_loader, model, criterion, args):
         )
 
     overall_error = 100.0 * np.mean(
-        list(
-            corruption_errors.values()
-        )
+        list(corruption_errors.values())
     )
 
     group_errors = {}
@@ -1068,9 +1213,7 @@ def evaluate_c(eval_loader, model, criterion, args):
                 for corruption in corruptions
             ]
 
-            group_severity_errors[
-                group_name
-            ][severity] = (
+            group_severity_errors[group_name][severity] = (
                 100.0 * np.mean(values)
             )
 
@@ -1088,11 +1231,7 @@ def evaluate_c(eval_loader, model, criterion, args):
         )
     )
 
-    for group_name in [
-        'low',
-        'medium',
-        'high'
-    ]:
+    for group_name in ['low', 'medium', 'high']:
         print(
             ' * {:6s} Error:      {:.4f}%'.format(
                 group_name.capitalize(),
@@ -1109,174 +1248,92 @@ def evaluate_c(eval_loader, model, criterion, args):
             'Medium: {:.4f}% | '
             'High: {:.4f}%'.format(
                 severity,
-                group_severity_errors[
-                    'low'
-                ][severity],
-                group_severity_errors[
-                    'medium'
-                ][severity],
-                group_severity_errors[
-                    'high'
-                ][severity]
+                group_severity_errors['low'][severity],
+                group_severity_errors['medium'][severity],
+                group_severity_errors['high'][severity]
             )
         )
 
     results = {
-        'clean_error':
-            100.0 * clean_error,
-
-        'overall_error':
-            overall_error,
-
-        'group_errors':
-            group_errors,
-
-        'group_severity_errors':
-            group_severity_errors,
+        'clean_error': 100.0 * clean_error,
+        'overall_error': overall_error,
+        'group_errors': group_errors,
+        'group_severity_errors': group_severity_errors,
 
         'corruption_errors': {
             name: 100.0 * error
-            for name, error
-            in corruption_errors.items()
+            for name, error in corruption_errors.items()
         },
 
         'severity_errors': {
             distortion_name: {
                 severity: 100.0 * error
-                for severity, error
-                in severity_dict.items()
+                for severity, error in severity_dict.items()
             }
-            for distortion_name, severity_dict
-            in severity_errors.items()
+            for distortion_name, severity_dict in severity_errors.items()
         },
     }
 
-    # Save all corruption x severity results of this seed.
-    rows = []
-
-    for distortion_name in distortions:
-        group_name = corruption_to_group[
-            distortion_name
-        ]
-
-        for severity in range(1, 6):
-            rows.append({
-                'seed':
-                    args.seed,
-
-                'corruption':
-                    distortion_name,
-
-                'frequency_group':
-                    group_name,
-
-                'severity':
-                    severity,
-
-                'error':
-                    results[
-                        'severity_errors'
-                    ][distortion_name][severity],
-            })
-
-    csv_path = (
-        f'corruption_results_seed_{args.seed}.csv'
-    )
-
-    with open(
-        csv_path,
-        'w',
-        newline=''
-    ) as f:
-
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                'seed',
-                'corruption',
-                'frequency_group',
-                'severity',
-                'error',
-            ]
-        )
-
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print(
-        '\nSaved corruption results to: {}'.format(
-            csv_path
-        )
-    )
-
+    # Optional Weights & Biases logging
     if args.wandb:
         import wandb
 
         log_data = {
-            'clean_error':
-                results['clean_error'],
-
-            'corruption_error_all':
-                overall_error,
-
-            'corruption_error_low':
-                group_errors['low'],
-
-            'corruption_error_medium':
-                group_errors['medium'],
-
-            'corruption_error_high':
-                group_errors['high'],
+            'clean_error': results['clean_error'],
+            'corruption_error_all': overall_error,
+            'corruption_error_low': group_errors['low'],
+            'corruption_error_medium': group_errors['medium'],
+            'corruption_error_high': group_errors['high'],
         }
 
-        for group_name in [
-            'low',
-            'medium',
-            'high'
-        ]:
+        for group_name in ['low', 'medium', 'high']:
             for severity in range(1, 6):
-
                 log_data[
                     f'corruption_{group_name}_s{severity}'
-                ] = group_severity_errors[
-                    group_name
-                ][severity]
+                ] = group_severity_errors[group_name][severity]
 
         for distortion_name in distortions:
-
             log_data[
                 f'corruption_{distortion_name}'
-            ] = results[
-                'corruption_errors'
-            ][distortion_name]
+            ] = results['corruption_errors'][distortion_name]
 
             for severity in range(1, 6):
-
                 log_data[
                     f'corruption_{distortion_name}_s{severity}'
-                ] = results[
-                    'severity_errors'
-                ][distortion_name][severity]
+                ] = results['severity_errors'][distortion_name][severity]
 
         wandb.log(log_data)
 
     return results
 
 
+
 def evaluate_save(eval_loader, mean, std, args):
     import matplotlib.pyplot as plt
-    import os
+
+    mean = np.asarray(mean)[:, None, None]
+    std = np.asarray(std)[:, None, None]
+
     for i, (input, target) in enumerate(eval_loader):
-        img = (255*np.clip(input[0,...].data.cpu().numpy()*np.array(std)[:,None,None] + mean[:,None,None],0,1)).astype('uint8').transpose((1,2,0))
-        plt.imsave(os.path.join(args.out_dir,'%05d.png'%i),img)
+        img = input[0].cpu().numpy()
+        img = img * std + mean
+        img = np.clip(img, 0, 1).transpose(1, 2, 0)
+
+        plt.imsave(
+            os.path.join(args.out_dir, f'{i:05d}.png'),
+            img
+        )
 
 
 # def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 def save_checkpoint(state, is_best, epoch, out_dir='./', run_name='model'):
     torch.save(state, os.path.join(out_dir, 'checkpoint.pth.tar'))
     
-    if epoch % 10 == 0:
-        torch.save(state, os.path.join(out_dir, 'checkpoint_%03d.pth.tar' % epoch))
+    if (epoch + 1) % 10 == 0:
+        torch.save(
+            state,
+            os.path.join(out_dir, f'checkpoint_{epoch + 1:03d}.pth.tar')
+        )
     
     if is_best:
         best_path = os.path.join(out_dir, f"{run_name}_best.pth.tar")
@@ -1288,6 +1345,9 @@ def save_checkpoint(state, is_best, epoch, out_dir='./', run_name='model'):
 
 def build_run_name(args):
     parts = [args.arch, args.aa_type, f"seed{args.seed}"]
+    
+    if args.amp:
+        parts.append("amp")
 
     if args.aa_type in ['blur', 'soft', 'dab']:
         parts.append(f"filter{args.filter_size}")

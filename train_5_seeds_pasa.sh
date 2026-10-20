@@ -1,11 +1,3 @@
-#!/bin/bash
-
-set -e
-
-GPU=${1:-0}
-
-SEEDS=(1 2 3 4 5)
-
 # Initialize Conda
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
@@ -20,46 +12,12 @@ echo "Using physical GPU: $GPU"
 
 for SEED in "${SEEDS[@]}"; do
 
-    python main.py \
-        --arch resnet18 \
-        --aa_type pasa \
-        --filter_size 3 \
-        --pasa_group 4 \
-        --seed "$SEED"
+    python main.py --arch resnet18 --aa_type pasa --filter_size 3 --pasa_group 4 --seed "$SEED"
+    python main.py --arch resnet18 --aa_type pasa --filter_size 3 --pasa_group 8 --seed "$SEED"
+    python main.py --arch resnet18 --aa_type pasa --filter_size 3 --pasa_group 12 --seed "$SEED"
 
-    python main.py \
-        --arch resnet18 \
-        --aa_type pasa \
-        --filter_size 3 \
-        --pasa_group 8 \
-        --seed "$SEED"
-
-    python main.py \
-        --arch resnet18 \
-        --aa_type pasa \
-        --filter_size 3 \
-        --pasa_group 12 \
-        --seed "$SEED"
-
-    python main.py \
-        --arch resnet18 \
-        --aa_type pasa \
-        --filter_size 5 \
-        --pasa_group 4 \
-        --seed "$SEED"
-
-    python main.py \
-        --arch resnet18 \
-        --aa_type pasa \
-        --filter_size 5 \
-        --pasa_group 8 \
-        --seed "$SEED"
-
-    python main.py \
-        --arch resnet18 \
-        --aa_type pasa \
-        --filter_size 5 \
-        --pasa_group 12 \
-        --seed "$SEED"
+    python main.py --arch resnet18 --aa_type pasa --filter_size 5 --pasa_group 4 --seed "$SEED"
+    python main.py --arch resnet18 --aa_type pasa --filter_size 5 --pasa_group 8 --seed "$SEED"
+    python main.py --arch resnet18 --aa_type pasa --filter_size 5 --pasa_group 12 --seed "$SEED"
 
 done
