@@ -3,14 +3,16 @@ set -u
 
 SEEDS=(1 2 3 4 5)
 
-GPU0="${GPU0:-0}"
-GPU1="${GPU1:-1}"
+# Defaults: physical GPU 2 and GPU 3. Override with GPU0=... GPU1=...
+GPU0="${GPU0:-2}"
+GPU1="${GPU1:-3}"
+EPOCHS="${EPOCHS:-50}"
 CONDA_ENV="${CONDA_ENV:-py312lt}"
 
 SCRIPT_PATH="$(readlink -f "$0")"
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 
-RUN_NAME="${RUN_NAME:-tinyimagenet_aa_ablation}"
+RUN_NAME="${RUN_NAME:-tinyimagenet_aa_ablation_b128_ba2_e${EPOCHS}}"
 RUN_DIR="$PROJECT_DIR/training_runs/$RUN_NAME"
 LOG_DIR="$RUN_DIR/logs"
 STATUS_DIR="$RUN_DIR/status"
@@ -27,6 +29,7 @@ if [[ "${1:-}" == "worker" ]]; then
     PROJECT_DIR="$4"
     CONDA_BASE="$5"
     CONDA_ENV="$6"
+    EPOCHS="$7"
 
     LOG_DIR="$RUN_DIR/logs"
     STATUS_DIR="$RUN_DIR/status"
@@ -39,20 +42,19 @@ if [[ "${1:-}" == "worker" ]]; then
     source "$CONDA_BASE/etc/profile.d/conda.sh"
     conda activate "$CONDA_ENV" || exit 1
 
+    # Inside this process, selected physical GPU is visible as cuda:0.
     export CUDA_VISIBLE_DEVICES="$GPU"
 
     # Fixed training protocol used for every configuration.
     COMMON_ARGS=(
         python -u main.py
         --arch resnet18
-        -b 32
-        -ba 8
     )
 
     echo "Worker started"
-    echo "GPU:    $GPU"
-    echo "Conda:  $CONDA_DEFAULT_ENV"
-    echo "Python: $(command -v python)"
+    echo "Physical GPU: $GPU (visible as CUDA device 0)"
+    echo "Conda:        $CONDA_DEFAULT_ENV"
+    echo "Python:       $(command -v python)"
     echo
 
     while true; do
@@ -92,85 +94,65 @@ if [[ "${1:-}" == "worker" ]]; then
 
             case "$JOB" in
                 baseline)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type none --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type none --seed "$SEED")
                     ;;
-
                 blur_f2)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 2 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 2 --seed "$SEED")
                     ;;
-
                 blur_f3)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 3 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 3 --seed "$SEED")
                     ;;
-
                 blur_f5)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 5 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type blur --filter_size 5 --seed "$SEED")
                     ;;
-
                 dwt_haar)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type haar --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type haar --seed "$SEED")
                     ;;
-
                 dwt_db2)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type db2 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type db2 --seed "$SEED")
                     ;;
-
                 dwt_db4)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type db4 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type db4 --seed "$SEED")
                     ;;
-
                 dwt_bior3_3)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type bior3.3 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dwt --wavelet_type bior3.3 --seed "$SEED")
                     ;;
-
                 pasa_f3_g1)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 1 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa --filter_size 3 --pasa_group 1 --seed "$SEED")
                     ;;
-
                 pasa_f3_g2)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 2 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa --filter_size 3 --pasa_group 2 --seed "$SEED")
                     ;;
-
                 pasa_f3_g4)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 4 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa --filter_size 3 --pasa_group 4 --seed "$SEED")
                     ;;
-
                 pasa_f3_g8)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 8 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa --filter_size 3 --pasa_group 8 --seed "$SEED")
                     ;;
-
                 pasa_f3_g16)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 3 --pasa_group 16 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa --filter_size 3 --pasa_group 16 --seed "$SEED")
                     ;;
-
                 pasa_f5_g8)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa_efficient --filter_size 5 --pasa_group 8 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type pasa --filter_size 5 --pasa_group 8 --seed "$SEED")
                     ;;
-
                 dab_f3)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 3 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 3 --seed "$SEED")
                     ;;
-
                 dab_f5)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 5 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 5 --seed "$SEED")
                     ;;
-
                 dab_f7)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 7 --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type dab --filter_size 7 --seed "$SEED")
                     ;;
-
                 asap_sp)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_sp --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_sp --seed "$SEED")
                     ;;
-
                 asap_stbl)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_stbl --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_stbl --seed "$SEED")
                     ;;
-
                 asap_lp)
-                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_lp --seed "$SEED" --amp)
+                    CMD=("${COMMON_ARGS[@]}" --aa_type asap_lp --seed "$SEED")
                     ;;
-
                 *)
                     echo "ERROR: unknown job '$JOB'"
                     exit 1
@@ -240,6 +222,22 @@ if ! conda env list | awk '{print $1}' | grep -Fxq "$CONDA_ENV"; then
     exit 1
 fi
 
+# Never reset the queue while an existing worker is still using it.
+for SESSION in thesis_gpu0 thesis_gpu1 thesis_gpu2 thesis_gpu3; do
+    if screen -ls 2>/dev/null | grep -q "[.]${SESSION}[[:space:]]"; then
+        echo "ERROR: screen session '$SESSION' already exists."
+        screen -ls
+        exit 1
+    fi
+done
+
+# Select two distinct physical GPU IDs.
+GPU_IDS=("$GPU0" "$GPU1")
+if [[ "$(printf '%s\n' "${GPU_IDS[@]}" | sort -u | wc -l)" -ne 2 ]]; then
+    echo "ERROR: GPU0 and GPU1 must refer to two distinct physical GPUs."
+    exit 1
+fi
+
 cat > "$QUEUE_FILE" <<'JOBS'
 baseline
 blur_f2
@@ -265,37 +263,31 @@ JOBS
 
 echo 1 > "$QUEUE_INDEX"
 
-for SESSION in thesis_gpu0 thesis_gpu1; do
-    if screen -ls 2>/dev/null | grep -q "[.]${SESSION}[[:space:]]"; then
-        echo "ERROR: screen session '$SESSION' already exists."
-        screen -ls
-        exit 1
-    fi
-done
-
 echo "Starting Tiny ImageNet AA experiments"
 echo
 echo "Project: $PROJECT_DIR"
 echo "Conda:   $CONDA_ENV"
 echo "GPUs:    $GPU0, $GPU1"
+echo "Training: B128 / BA2 / ${EPOCHS} epochs"
+echo "AMP:      disabled (--amp not set in COMMON_ARGS)"
 echo "Seeds:   ${SEEDS[*]}"
 echo "Configs: 20"
 echo "Runs:    100"
 echo
 
 screen -dmS thesis_gpu0 \
-    bash "$SCRIPT_PATH" worker "$GPU0" "$RUN_DIR" "$PROJECT_DIR" "$CONDA_BASE" "$CONDA_ENV"
+    bash "$SCRIPT_PATH" worker "$GPU0" "$RUN_DIR" "$PROJECT_DIR" "$CONDA_BASE" "$CONDA_ENV" "$EPOCHS"
 
 screen -dmS thesis_gpu1 \
-    bash "$SCRIPT_PATH" worker "$GPU1" "$RUN_DIR" "$PROJECT_DIR" "$CONDA_BASE" "$CONDA_ENV"
+    bash "$SCRIPT_PATH" worker "$GPU1" "$RUN_DIR" "$PROJECT_DIR" "$CONDA_BASE" "$CONDA_ENV" "$EPOCHS"
 
 sleep 1
 screen -ls
 
 echo
 echo "Attach workers:"
-echo "  screen -r thesis_gpu0"
-echo "  screen -r thesis_gpu1"
+echo "  screen -r thesis_gpu0  (physical GPU $GPU0)"
+echo "  screen -r thesis_gpu1  (physical GPU $GPU1)"
 echo
 echo "Logs:"
 echo "  $LOG_DIR"

@@ -8,17 +8,28 @@ import pywt
 
 # Using the wavelet low pass filter method from WaveCNet. The other methods are not for classification purposes
 class DWTFunction_2D_tiny(Function):
+
     @staticmethod
-    def forward(ctx, input, matrix_Low_0, matrix_Low_1, matrix_High_0, matrix_High_1):
-        ctx.save_for_backward(matrix_Low_0, matrix_Low_1, matrix_High_0, matrix_High_1)
+    @torch.amp.custom_fwd(device_type="cuda", cast_inputs=torch.float32)
+    def forward(ctx, input, matrix_Low_0, matrix_Low_1,
+                matrix_High_0, matrix_High_1):
+
+        ctx.save_for_backward(matrix_Low_0, matrix_Low_1)
+
         L = torch.matmul(matrix_Low_0, input)
         LL = torch.matmul(L, matrix_Low_1)
+
         return LL
+
     @staticmethod
+    @torch.amp.custom_bwd(device_type="cuda")
     def backward(ctx, grad_LL):
-        matrix_Low_0, matrix_Low_1, matrix_High_0, matrix_High_1 = ctx.saved_variables
+
+        matrix_Low_0, matrix_Low_1 = ctx.saved_tensors
+
         grad_L = torch.matmul(grad_LL, matrix_Low_1.t())
         grad_input = torch.matmul(matrix_Low_0.t(), grad_L)
+
         return grad_input, None, None, None, None
 
 
@@ -46,15 +57,24 @@ class DWT_2D_tiny(Module):
         assert self.band_length % 2 == 0
         self.band_length_half = math.floor(self.band_length / 2)
 
-    def get_matrix(self):
-        """
+    def get_matrix(self, device):
+        r"""
         generating the matrices: \mathcal{L}, \mathcal{H}
         :return: self.matrix_low = \mathcal{L}, self.matrix_high = \mathcal{H}
         """
         L1 = np.max((self.input_height, self.input_width))
         L = math.floor(L1 / 2)
-        matrix_h = np.zeros( ( L,      L1 + self.band_length - 2 ) )
-        matrix_g = np.zeros( ( L1 - L, L1 + self.band_length - 2 ) )
+        # matrix_h = np.zeros( ( L,      L1 + self.band_length - 2 ) )
+        # matrix_g = np.zeros( ( L1 - L, L1 + self.band_length - 2 ) )
+        matrix_h = np.zeros(
+            (L, L1 + self.band_length - 2),
+            dtype=np.float32
+        )
+
+        matrix_g = np.zeros(
+            (L1 - L, L1 + self.band_length - 2),
+            dtype=np.float32
+        )
         end = None if self.band_length_half == 1 else (-self.band_length_half+1)
 
         index = 0
@@ -81,18 +101,26 @@ class DWT_2D_tiny(Module):
         matrix_g_1 = np.transpose(matrix_g_1)
 
         if torch.cuda.is_available():
-            self.matrix_low_0 = torch.Tensor(matrix_h_0).cuda()
-            self.matrix_low_1 = torch.Tensor(matrix_h_1).cuda()
-            self.matrix_high_0 = torch.Tensor(matrix_g_0).cuda()
-            self.matrix_high_1 = torch.Tensor(matrix_g_1).cuda()
+            self.matrix_low_0 = torch.as_tensor(
+                matrix_h_0, dtype=torch.float32, device=device
+            )
+            self.matrix_low_1 = torch.as_tensor(
+                matrix_h_1, dtype=torch.float32, device=device
+            )
+            self.matrix_high_0 = torch.as_tensor(
+                matrix_g_0, dtype=torch.float32, device=device
+            )
+            self.matrix_high_1 = torch.as_tensor(
+                matrix_g_1, dtype=torch.float32, device=device
+            )
         else:
-            self.matrix_low_0 = torch.Tensor(matrix_h_0)
-            self.matrix_low_1 = torch.Tensor(matrix_h_1)
-            self.matrix_high_0 = torch.Tensor(matrix_g_0)
-            self.matrix_high_1 = torch.Tensor(matrix_g_1)
+            self.matrix_low_0 = torch.as_tensor(matrix_h_0, dtype=torch.float32)
+            self.matrix_low_1 = torch.as_tensor(matrix_h_1, dtype=torch.float32)
+            self.matrix_high_0 = torch.as_tensor(matrix_g_0, dtype=torch.float32)
+            self.matrix_high_1 = torch.as_tensor(matrix_g_1, dtype=torch.float32)
 
     def forward(self, input):
-        """
+        r"""
         input_lfc = \mathcal{L} * input * \mathcal{L}^T
         #input_hfc_lh = \mathcal{H} * input * \mathcal{L}^T
         #input_hfc_hl = \mathcal{L} * input * \mathcal{H}^T
@@ -103,5 +131,5 @@ class DWT_2D_tiny(Module):
         assert len(input.size()) == 4
         self.input_height = input.size()[-2]
         self.input_width = input.size()[-1]
-        self.get_matrix()
+        self.get_matrix(input.device)
         return DWTFunction_2D_tiny.apply(input, self.matrix_low_0, self.matrix_low_1, self.matrix_high_0, self.matrix_high_1)

@@ -60,12 +60,21 @@ parser.add_argument('-ep', '--epochs', default=50, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-
+parser.add_argument("--eval-seed", type=int, default=42)
 parser.add_argument('-b', '--batch-size', default=32, type=int,
                     metavar='N',
-                    help='mini-batch size (default: 32), this is the total '
+                    help='mini-batch size (default: 128), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
+parser.add_argument("--eval-batch-size", type=int, default=256, help="batch size for evaluation (default: 256)")
+parser.add_argument('-ba', '--batch-accum', default=8, type=int,
+                    metavar='N',
+                    help='number of mini-batches to accumulate gradient over before updating (default: 8)')
+parser.add_argument(
+    "--compile",
+    action="store_true",
+    help="Enable torch.compile (default: disabled)"
+)
 parser.add_argument(
     '--amp',
     action='store_true',
@@ -161,10 +170,6 @@ parser.add_argument('--evaluate_efficiency', action='store_true',
 parser.add_argument('--epochs-shift', default=5, type=int, metavar='N',
                     help='number of total epochs to run for shift-invariance test')
 
-parser.add_argument('-ba', '--batch-accum', default=8, type=int,
-                    metavar='N',
-                    help='number of mini-batches to accumulate gradient over before updating (default: 8)')
-
 parser.add_argument('--embed', dest='embed', action='store_true',
                     help='embed statement before anything is evaluated (for debugging)')
 
@@ -197,7 +202,7 @@ def main():
     
     if args.aa_type in ('blur', 'soft', 'dab'):
         print(f"filter_size: {args.filter_size}")
-    elif args.aa_type == 'pasa':
+    elif args.aa_type in ('pasa', 'pasa_efficient'):
         print(f"filter_size: {args.filter_size}")
         print(f"pasa_group: {args.pasa_group}")
     elif args.aa_type == 'dwt':
@@ -339,14 +344,26 @@ def main_worker(gpu, ngpus_per_node, args):
             model = torch.nn.DataParallel(model).cuda()
 
     # define loss function (criterion) and optimizer
+    if args.compile:
+        raw_model = model.module if hasattr(model, "module") else model
+        raw_model.compile(mode="default")
+
+        print(
+            f"torch.compile enabled: "
+            f"{raw_model._compiled_call_impl is not None}",
+            flush=True,
+        )
+
     criterion = nn.CrossEntropyLoss().cuda(args.gpu)
+
     optimizer = torch.optim.SGD(
         model.parameters(), 
         args.lr,
         momentum=args.momentum,
         weight_decay=args.weight_decay,
         # added for ResNet-18 training; probably args needed; mentioned in Tiny-ImageNet-Paper
-        nesterov=True
+        nesterov=True,
+        fused=True
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
@@ -388,10 +405,13 @@ def main_worker(gpu, ngpus_per_node, args):
     val_dir = os.path.join(args.data, 'val')
     test_dir = os.path.join(args.data, 'test')
 
-    # "Normalization ensures that the input features have a similar distribution. 
-    # This is crucial because it helps the gradient descent algorithm converge faster and more stably by conditioning the Hessian matrix (LeCun et al., 1998). 
-    # Therefore, calculating the exact mean and standard deviation for a specific dataset like Tiny ImageNet—rather than relying on generic values—is considered a best practice for maximizing performance (Krizhevsky et al., 2012)."
-    # Done to replicate the full ImageNet-1k scenario
+    # Input normalization (per channel): x' = (x - mean) / std
+    # Centering and scaling the inputs improves the conditioning of
+    # gradient-based optimization (LeCun et al., 1998, Sec. 4.3).
+    # mean/std: population statistics (1/N) over all pixels of the
+    # Tiny ImageNet training set, ToTensor only, no augmentation:
+    #   mean = E[x],  std = sqrt(E[x^2] - E[x]^2)
+    # Formula: Bishop (1995), Sec. 8.2; implemented by transforms.Normalize.
     mean = [0.4802, 0.4481, 0.3975]
     std  = [0.2764, 0.2689, 0.2816]
     normalize = transforms.Normalize(mean=mean, std=std) # for Tiny-ImageNet
@@ -400,6 +420,7 @@ def main_worker(gpu, ngpus_per_node, args):
     train_dataset = datasets.ImageFolder(
         train_dir,
         transforms.Compose([
+            transforms.RandomResizedCrop(64),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -414,8 +435,12 @@ def main_worker(gpu, ngpus_per_node, args):
     g.manual_seed(args.seed)
 
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler,
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=(train_sampler is None),
+        num_workers=args.workers,
+        pin_memory=True,
+        sampler=train_sampler,
         worker_init_fn=seed_worker,
         generator=g,
         persistent_workers=args.workers > 0
@@ -467,7 +492,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
     eval_loader = torch.utils.data.DataLoader(
         eval_dataset,
-        batch_size=args.batch_size,
+        batch_size=(
+            1 if (args.evaluate_diagonal or args.evaluate_save)
+            else args.eval_batch_size
+        ),
         shuffle=False,
         num_workers=args.workers,
         pin_memory=True,
@@ -650,7 +678,6 @@ def main_worker(gpu, ngpus_per_node, args):
             )
 
 
-
 def train(train_loader, model, criterion, optimizer, epoch, args, scaler):
     batch_time = AverageMeter()
     data_time = AverageMeter()
@@ -707,10 +734,9 @@ def train(train_loader, model, criterion, optimizer, epoch, args, scaler):
             # Unscale gradients after accumulation
             scaler.unscale_(optimizer)
 
-            # Normalize by the actual number of samples
-            for param in model.parameters():
-                if param.grad is not None:
-                    param.grad.div_(accumulated_samples)
+            # Normalize by the actual number of samples more efficiently using torch._foreach_div_ (in-place)
+            grads = [p.grad for p in model.parameters() if p.grad is not None]
+            torch._foreach_div_(grads, accumulated_samples)
 
             # Optimizer step (automatically handles AMP/FP32)
             scaler.step(optimizer)
@@ -763,7 +789,9 @@ def evaluate(eval_loader, model, criterion, args):
  
     model.eval()
  
-    with torch.no_grad():
+    # with torch.no_grad():
+    # better alternative to this line
+    with torch.inference_mode():
         end = time.time()
         for i, (input, target) in enumerate(eval_loader):
             if args.gpu is not None:
@@ -864,13 +892,17 @@ def measure_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repe
     timings = np.zeros((repetitions, 1))
  
     # GPU warmup — avoids measuring initialization overhead
-    with torch.no_grad():
+    # with torch.no_grad():
+    # better alternative to this line
+    with torch.inference_mode():
         for _ in range(warmup):
             _ = model(dummy_input)
         torch.cuda.synchronize()
  
     # Measure performance
-    with torch.no_grad():
+    # with torch.no_grad():
+    # better alternative to this line
+    with torch.inference_mode():
         for rep in range(repetitions):
             starter.record()
             _ = model(dummy_input)
@@ -889,59 +921,156 @@ def measure_latency(model, gpu=None, input_size=(1, 3, 64, 64), warmup=100, repe
     return median_ms
 
 
-def evaluate_shift(eval_loader, model, args):
-    batch_time = AverageMeter()
-    consist = AverageMeter()
-    jsd = AverageMeter()
+def crop_batch_with_offsets(images, offsets, crop_size=64):
+    B, C, H, W = images.shape
 
+    rows = offsets[:, 0, None, None] + torch.arange(
+        crop_size, device=images.device
+    )[None, :, None]
+
+    cols = offsets[:, 1, None, None] + torch.arange(
+        crop_size, device=images.device
+    )[None, None, :]
+
+    indices = (rows * W + cols).reshape(B, 1, -1)
+    indices = indices.expand(-1, C, -1)
+
+    return images.reshape(B, C, H * W).gather(
+        2, indices
+    ).reshape(B, C, crop_size, crop_size)
+
+def evaluate_shift(eval_loader, model, args):
     model.eval()
-    with torch.no_grad():
-        end = time.time()
+
+    results = {
+        "zhang": {
+            "consistency": AverageMeter(),
+            "jsd": AverageMeter(),
+        },
+        "per_image": {
+            "consistency": AverageMeter(),
+            "jsd": AverageMeter(),
+        },
+    }
+
+    rng_zhang = np.random.default_rng(args.eval_seed)
+    rng_image = np.random.default_rng(args.eval_seed)
+
+    with torch.inference_mode():
         for ep in range(args.epochs_shift):
             for i, (input, target) in enumerate(eval_loader):
                 if args.gpu is not None:
                     input = input.cuda(args.gpu, non_blocking=True)
-                target = target.cuda(args.gpu, non_blocking=True)
 
-                off0 = np.random.randint(9, size=2)
-                off1 = np.random.randint(9, size=2)
+                B = input.size(0)
 
-                output0 = model(input[:,:,off0[0]:off0[0]+64,off0[1]:off0[1]+64])
-                output1 = model(input[:,:,off1[0]:off1[0]+64,off1[1]:off1[1]+64])
+                # ======================================
+                # 1. Zhang: one shift pair per batch
+                # ======================================
 
-                # Binary shift consistency
-                cur_agree = agreement(output0, output1).type(torch.FloatTensor).to(output0.device)
-                consist.update(cur_agree.item(), input.size(0))
+                off0 = rng_zhang.integers(0, 9, size=2)
+                off1 = rng_zhang.integers(0, 9, size=2)
 
-                # Jensen-Shannon distance (sqrt of the divergence, base 2 -> range [0, 1])
-                # computed with the reference implementation scipy.spatial.distance.jensenshannon.
-                # added to measure consistency with a proper metric.
-                # Note: for near-identical outputs (high consistency) the JS divergence is ~0;
-                # float64 keeps the precision needed to avoid sqrt of a slightly negative
-                # rounding value.
-                prob0 = torch.nn.Softmax(dim=1)(output0).cpu().numpy().astype(np.float64)
-                prob1 = torch.nn.Softmax(dim=1)(output1).cpu().numpy().astype(np.float64)
-                vals = np.array([jensenshannon(prob0[k], prob1[k], base=2)
-                                 for k in range(prob0.shape[0])])
-                cur_jsd = np.mean(vals)
-                jsd.update(float(cur_jsd), input.size(0))
+                zhang_input0 = input[
+                    :, :,
+                    off0[0]:off0[0]+64,
+                    off0[1]:off0[1]+64
+                ]
 
-                batch_time.update(time.time() - end)
-                end = time.time()
+                zhang_input1 = input[
+                    :, :,
+                    off1[0]:off1[0]+64,
+                    off1[1]:off1[1]+64
+                ]
+
+                # ======================================
+                # 2. Per-image: independent shift pairs
+                # ======================================
+
+                offsets = torch.as_tensor(
+                    rng_image.integers(
+                        0, 9,
+                        size=(B, 2, 2)
+                    ),
+                    dtype=torch.long,
+                    device=input.device
+                )
+
+                image_input0 = crop_batch_with_offsets(
+                    input, offsets[:, 0]
+                )
+
+                image_input1 = crop_batch_with_offsets(
+                    input, offsets[:, 1]
+                )
+
+                # ======================================
+                # 3. Evaluate consistency and JSD
+                # ======================================
+
+                for method, input0, input1 in (
+                    ("zhang", zhang_input0, zhang_input1),
+                    ("per_image", image_input0, image_input1),
+                ):
+                    output0 = model(input0)
+                    output1 = model(input1)
+
+                    # Classification consistency
+                    cur_agree = (
+                        output0.argmax(dim=1)
+                        == output1.argmax(dim=1)
+                    ).float().mean() * 100.0
+
+                    results[method]["consistency"].update(
+                        cur_agree.item(), B
+                    )
+
+                    # Jensen-Shannon distance
+                    prob0 = torch.softmax(
+                        output0, dim=1
+                    ).cpu().numpy().astype(np.float64)
+
+                    prob1 = torch.softmax(
+                        output1, dim=1
+                    ).cpu().numpy().astype(np.float64)
+
+                    vals = jensenshannon(
+                        prob0, prob1,
+                        base=2,
+                        axis=1
+                    )
+
+                    results[method]["jsd"].update(
+                        float(vals.mean()), B
+                    )
 
                 if i % args.print_freq == 0:
-                    print('Ep [{0}/{1}]:\t'
-                          'Test: [{2}/{3}]\t'
-                          'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                          'Consist {consist.val:.4f} ({consist.avg:.4f})\t'
-                          'JSD {jsd.val:.4f} ({jsd.avg:.4f})\t'.format(
-                           ep, args.epochs_shift, i, len(eval_loader),
-                           batch_time=batch_time, consist=consist, jsd=jsd))
+                    print(
+                        f"Epoch [{ep + 1}/{args.epochs_shift}] "
+                        f"Batch [{i + 1}/{len(eval_loader)}] | "
+                        f"Zhang: {results['zhang']['consistency'].avg:.4f} | "
+                        f"Per-image: {results['per_image']['consistency'].avg:.4f}"
+                    )
 
-        print(' * Consistency {consist.avg:.4f} JSD {jsd.avg:.4f}'
-              .format(consist=consist, jsd=jsd))
+    print("\n========== SHIFT EVALUATION ==========")
 
-    return consist.avg, jsd.avg
+    for method in ("zhang", "per_image"):
+        consistency = results[method]["consistency"].avg
+        jsd = results[method]["jsd"].avg
+
+        print(
+            f"{method:10s} | "
+            f"Consistency: {consistency:.4f}% | "
+            f"JSD: {jsd:.6f}"
+        )
+
+    return {
+        method: {
+            metric: meter.avg
+            for metric, meter in metrics.items()
+        }
+        for method, metrics in results.items()
+    }
 
 
 def evaluate_diagonal(eval_loader, model, args):
@@ -959,7 +1088,9 @@ def evaluate_diagonal(eval_loader, model, args):
     diag_corrs = np.zeros((len(eval_loader.dataset),D))
     diag_preds = np.zeros((len(eval_loader.dataset),D))
 
-    with torch.no_grad():
+    # with torch.no_grad():
+    # better alternative to this line
+    with torch.inference_mode():
         end = time.time()
         for i, (input, target) in enumerate(eval_loader):
             if args.gpu is not None:
@@ -1118,8 +1249,10 @@ def evaluate_c(eval_loader, model, criterion, args):
                 pin_memory=eval_loader.pin_memory,
                 persistent_workers=False
             )
-
-            with torch.no_grad():
+            
+            # with torch.no_grad():
+            # better alternative to this line
+            with torch.inference_mode():
                 for i, (input, target) in enumerate(corruption_loader):
 
                     if args.gpu is not None:
@@ -1345,19 +1478,22 @@ def save_checkpoint(state, is_best, epoch, out_dir='./', run_name='model'):
 
 def build_run_name(args):
     parts = [args.arch, args.aa_type, f"seed{args.seed}"]
-    
-    if args.amp:
-        parts.append("amp")
 
     if args.aa_type in ['blur', 'soft', 'dab']:
         parts.append(f"filter{args.filter_size}")
 
-    if args.aa_type == 'pasa':
+    if args.aa_type in ('pasa', 'pasa_efficient'):
         parts.append(f"filter{args.filter_size}")
         parts.append(f"group{args.pasa_group}")
 
     if args.aa_type == 'dwt':
         parts.append(args.wavelet_type)
+
+    if args.compile:
+        parts.append("compile")
+    
+    if args.amp:
+        parts.append("amp")
 
     return "_".join(parts)
 
@@ -1382,7 +1518,9 @@ class AverageMeter(object):
 
 def accuracy(output, target, topk=(1,)):
     """Computes the accuracy over the k top predictions for the specified values of k"""
-    with torch.no_grad():
+    # with torch.no_grad():
+    # better alternative to this line
+    with torch.inference_mode():
         maxk = max(topk)
         batch_size = target.size(0)
 

@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """
-Check the 'epoch' value inside every .pth.tar checkpoint in ./saved_checkpoints
-and report files whose epoch does NOT match an expected value.
+Check every .pth.tar checkpoint in ./out/<method>/ subfolders and report,
+per method, whether training reached and FINISHED the target epoch
+(default: 50), i.e. it was not aborted.
+
+A METHOD counts as "finished" when at least one of its checkpoints
+(usually the latest/last one, e.g. checkpoint.pth.tar) shows that the target
+epoch was completed. The best-model checkpoint may hold an earlier epoch —
+that is expected and does NOT count as aborted. Per method, the highest
+epoch found across all its checkpoints decides.
+
+If a method only has a best-model checkpoint, its epoch is the best epoch,
+not the last one, so completion can't be proven from the files alone.
 
 Usage:
-    python check_epochs.py <expected_epochs>
+    python check_training_finished.py                 # out/, target 50
+    python check_training_finished.py --target 50 --folder out
+    python check_training_finished.py --zero-indexed  # if you saved 'epoch' as the loop index
 
-Example:
-    python check_epochs.py 100
+Exit code: 0 if every method finished, 1 otherwise (handy in scripts/CI).
 """
 
 import argparse
@@ -16,74 +27,104 @@ from pathlib import Path
 
 import torch
 
-FOLDER = Path("saved_checkpoints")
 
+def load_epoch(path: Path):
+    """Return (epoch_or_None, has_model_weights)."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(ckpt, dict):
+        return None, False
 
-def get_epoch(checkpoint_path: Path):
-    """Load a .pth.tar file and return its 'epoch' value, or None if missing."""
-    # weights_only=False is needed because checkpoints often contain
-    # non-tensor objects (optimizer state, epoch ints, etc.)
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    epoch = ckpt.get("epoch")
+    if torch.is_tensor(epoch):
+        epoch = epoch.item()
+    if epoch is not None:
+        epoch = int(epoch)
 
-    # Most checkpoints are dicts with an 'epoch' key
-    if isinstance(ckpt, dict) and "epoch" in ckpt:
-        return ckpt["epoch"]
-    return None
+    has_weights = any(k in ckpt for k in ("state_dict", "model_state_dict", "model"))
+    return epoch, has_weights
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Find .pth.tar files in ./saved_checkpoints whose epoch count != expected value."
+    p = argparse.ArgumentParser(description="Check that training reached and finished the target epoch.")
+    p.add_argument("--folder", type=Path, default=Path("out"), help="Folder with checkpoints (default: out)")
+    p.add_argument("--target", type=int, default=50, help="Epoch that must be finished (default: 50)")
+    p.add_argument(
+        "--zero-indexed",
+        action="store_true",
+        help="Use if the saved 'epoch' is the 0-based loop index of the last completed epoch "
+             "(then epoch 50 finished => saved value 49). Default assumes the saved value is the "
+             "number of completed epochs (e.g. torch.save({'epoch': epoch + 1, ...})).",
     )
-    parser.add_argument("expected", type=int, help="Expected number of epochs")
-    args = parser.parse_args()
+    args = p.parse_args()
 
-    if not FOLDER.is_dir():
-        print(f"Error: {FOLDER} is not a directory", file=sys.stderr)
-        sys.exit(1)
+    if not args.folder.is_dir():
+        print(f"Error: {args.folder} is not a directory", file=sys.stderr)
+        sys.exit(2)
 
-    pth_files = sorted(FOLDER.glob("*.pth.tar"))
+    # out/<method>/.../*.pth.tar  (also picks up files directly in out/)
+    files = sorted(args.folder.rglob("*.pth.tar"))
+    if not files:
+        print(f"No .pth.tar files found in {args.folder} or its subfolders")
+        sys.exit(2)
 
-    if not pth_files:
-        print(f"No .pth.tar files found in {FOLDER}")
-        return
+    # Saved value that means "target epoch is done"
+    required = args.target - 1 if args.zero_indexed else args.target
 
-    mismatches = []
-    missing_key = []
-    errors = []
+    # method name = first folder below out/
+    by_method = {}
+    for f in files:
+        rel = f.relative_to(args.folder)
+        method = rel.parts[0] if len(rel.parts) > 1 else "(top level)"
+        by_method.setdefault(method, []).append(f)
 
-    for f in pth_files:
-        try:
-            epoch = get_epoch(f)
+    print(f"Checking {len(files)} checkpoint(s) in {len(by_method)} method folder(s) under {args.folder}/ "
+          f"— target: epoch {args.target} finished\n")
+
+    summary = []  # (method, finished, max_completed, source_file)
+
+    for method, mfiles in sorted(by_method.items()):
+        print(f"=== {method} ===")
+        best_epoch, best_file = None, None
+        for f in mfiles:
+            name = f.relative_to(args.folder / method) if method != "(top level)" else f.name
+            try:
+                epoch, has_weights = load_epoch(f)
+            except Exception as e:  # truncated / corrupt file -> save was interrupted
+                print(f"  CORRUPT   {name}  -> {type(e).__name__}: {e}")
+                continue
+
             if epoch is None:
-                missing_key.append(f)
-            elif epoch != args.expected:
-                mismatches.append((f, epoch))
-        except Exception as e:
-            errors.append((f, str(e)))
+                print(f"  NO EPOCH  {name}  (no 'epoch' key)")
+                continue
 
-    print(f"Checked {len(pth_files)} file(s). Expected epoch = {args.expected}\n")
+            completed = epoch + 1 if args.zero_indexed else epoch
+            note = "" if has_weights else "  [warning: no model weights found]"
+            print(f"  epoch {completed:>4}  {name}{note}")
+            if best_epoch is None or epoch > best_epoch:
+                best_epoch, best_file = epoch, name
 
-    if mismatches:
-        print(f"Files with mismatched epoch ({len(mismatches)}):")
-        for f, epoch in mismatches:
-            print(f"  {f}  (epoch={epoch})")
+        if best_epoch is None:
+            summary.append((method, False, None, None))
+        else:
+            completed = best_epoch + 1 if args.zero_indexed else best_epoch
+            summary.append((method, best_epoch >= required, completed, best_file))
         print()
 
-    if missing_key:
-        print(f"Files with no 'epoch' key ({len(missing_key)}):")
-        for f in missing_key:
-            print(f"  {f}")
-        print()
+    print("=== Summary (highest epoch per method) ===")
+    width = max(len(m) for m, *_ in summary)
+    for method, done, completed, src in summary:
+        if completed is None:
+            print(f"  FAIL {method:<{width}}  no readable checkpoint with an epoch")
+        else:
+            status = "OK  " if done else "FAIL"
+            print(f"  {status} {method:<{width}}  {completed}/{args.target} epochs  (from {src})")
+    print()
 
-    if errors:
-        print(f"Files that failed to load ({len(errors)}):")
-        for f, err in errors:
-            print(f"  {f}  -> {err}")
-        print()
-
-    if not mismatches and not missing_key and not errors:
-        print("All files match the expected epoch count.")
+    all_done = all(done for _, done, _, _ in summary)
+    print(f"All methods ran through epoch {args.target}." if all_done
+          else f"Some methods did NOT reach epoch {args.target} — see above.\n"
+               "(If a method only stores its best checkpoint, check the training log instead.)")
+    sys.exit(0 if all_done else 1)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 data_dir = 'tiny-imagenet-200'
 train_dataset = datasets.ImageFolder(root=data_dir + '/train', transform=transforms.ToTensor())
 
-loader = DataLoader(train_dataset, batch_size=128, shuffle=False, num_workers=4)
+loader = DataLoader(train_dataset, batch_size=256, shuffle=False, num_workers=4)
 
 mean = 0.0
 var = 0.0  # For E[X^2]
