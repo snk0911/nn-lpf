@@ -1460,20 +1460,20 @@ def evaluate_save(eval_loader, mean, std, args):
 
 # def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 def save_checkpoint(state, is_best, epoch, out_dir='./', run_name='model'):
-    torch.save(state, os.path.join(out_dir, 'checkpoint.pth.tar'))
-    
+    paths = [os.path.join(out_dir, 'checkpoint.pth.tar')]
+
     if (epoch + 1) % 10 == 0:
-        torch.save(
-            state,
-            os.path.join(out_dir, f'checkpoint_{epoch + 1:03d}.pth.tar')
-        )
-    
+        paths.append(os.path.join(out_dir, f'checkpoint_{epoch + 1:03d}.pth.tar'))
+
     if is_best:
-        best_path = os.path.join(out_dir, f"{run_name}_best.pth.tar")
-        shutil.copyfile(
-            os.path.join(out_dir, 'checkpoint.pth.tar'),
-            best_path
-        )
+        paths.append(os.path.join(out_dir, f'{run_name}_best.pth.tar'))
+
+    # Write to a temp file first, then rename in one step,
+    # so an interrupted save never leaves a half-written checkpoint
+    for path in paths:
+        tmp = path + '.tmp'
+        torch.save(state, tmp)
+        os.replace(tmp, path)
 
 
 def build_run_name(args):
