@@ -63,7 +63,7 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
 parser.add_argument("--eval-seed", type=int, default=42)
 parser.add_argument('-b', '--batch-size', default=32, type=int,
                     metavar='N',
-                    help='mini-batch size (default: 128), this is the total '
+                    help='mini-batch size (default: 32), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
 parser.add_argument("--eval-batch-size", type=int, default=256, help="batch size for evaluation (default: 256)")
@@ -360,10 +360,7 @@ def main_worker(gpu, ngpus_per_node, args):
         model.parameters(), 
         args.lr,
         momentum=args.momentum,
-        weight_decay=args.weight_decay,
-        # added for ResNet-18 training; probably args needed; mentioned in Tiny-ImageNet-Paper
-        nesterov=True,
-        fused=True
+        weight_decay=args.weight_decay
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp)
@@ -712,7 +709,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args, scaler):
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), input.size(0))
+        losses.update(loss.detach(), input.size(0))
         top1.update(acc1[0], input.size(0))
         top5.update(acc5[0], input.size(0))
 
@@ -802,7 +799,7 @@ def evaluate(eval_loader, model, criterion, args):
             loss = criterion(output, target)
  
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(), input.size(0))
+            losses.update(loss.detach(), input.size(0))
             top1.update(acc1[0], input.size(0))
             top5.update(acc5[0], input.size(0))
  

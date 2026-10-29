@@ -7,6 +7,7 @@ import pywt
 
 
 # Using the wavelet low pass filter method from WaveCNet. The other methods are not for classification purposes
+# Same as original WaveCNet, but with Caching and some changes needed for AMP.
 class DWTFunction_2D_tiny(Function):
 
     @staticmethod
@@ -56,6 +57,7 @@ class DWT_2D_tiny(Module):
         self.band_length = len(self.band_low)
         assert self.band_length % 2 == 0
         self.band_length_half = math.floor(self.band_length / 2)
+        self.matrix_low_0 = None  # CHANGED: empty until the first forward pass
 
     def get_matrix(self, device):
         r"""
@@ -129,7 +131,9 @@ class DWT_2D_tiny(Module):
         :return: the low-frequency component of the input 2D data
         """
         assert len(input.size()) == 4
-        self.input_height = input.size()[-2]
-        self.input_width = input.size()[-1]
-        self.get_matrix(input.device)
+        # CHANGED: check if the matrices are already created; if not, create them
+        if not torch.is_tensor(self.matrix_low_0):
+            self.input_height = input.size()[-2]
+            self.input_width = input.size()[-1]
+            self.get_matrix(input.device)
         return DWTFunction_2D_tiny.apply(input, self.matrix_low_0, self.matrix_low_1, self.matrix_high_0, self.matrix_high_1)
