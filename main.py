@@ -1140,6 +1140,19 @@ def evaluate_diagonal(eval_loader, model, args):
 
 
 def evaluate_c(eval_loader, model, criterion, args):
+    # CHANGED: docstring with the metric definitions (for the thesis)
+    """Top-1 error on Tiny ImageNet-C (15 corruptions x 5 severities), in FP32.
+
+    E_{c,s}  : top-1 error for corruption c at severity s
+    E_c      : mean over the 5 severities
+    overall  : mean over the 15 corruptions (= mean over all 75 sets).
+               UNNORMALIZED -- not the AlexNet-normalized mCE of
+               Hendrycks & Dietterich (2019). Normalization relative to the
+               ResNet-18 baseline (aa_type=none) is computed offline.
+    E_G      : mean of E_c over the corruptions of frequency group G.
+               Groups have 5/7/3 corruptions, so 'overall' is NOT the mean
+               of the three group errors.
+    """
     distortions = [
         'gaussian_noise',
         'shot_noise',
@@ -1208,6 +1221,12 @@ def evaluate_c(eval_loader, model, criterion, args):
         'Clean error: {:.4f}%'.format(
             100.0 * clean_error
         )
+    )
+
+    # CHANGED: one parseable line, same format as the 'Corruption result' lines
+    print(
+        f"Clean result | seed={args.seed} | "
+        f"error_pct={100.0 * clean_error:.4f}"
     )
 
     model.eval()
@@ -1315,6 +1334,8 @@ def evaluate_c(eval_loader, model, criterion, args):
             )
         )
 
+    # Unnormalized mean corruption error over all 15 corruptions
+    # CHANGED: comment only -- not Hendrycks' AlexNet-normalized mCE
     overall_error = 100.0 * np.mean(
         list(corruption_errors.values())
     )
@@ -1356,7 +1377,7 @@ def evaluate_c(eval_loader, model, criterion, args):
     )
 
     print(
-        ' * Overall Error:     {:.4f}%'.format(
+        ' * Mean Corruption Error (unnormalized): {:.4f}%'.format(  # CHANGED: label
             overall_error
         )
     )
@@ -1435,7 +1456,6 @@ def evaluate_c(eval_loader, model, criterion, args):
         wandb.log(log_data)
 
     return results
-
 
 
 def evaluate_save(eval_loader, mean, std, args):
